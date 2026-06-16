@@ -1,0 +1,614 @@
+*review.txt*	Merge Request / Pull Request review for Neovim
+
+Author:   Damian Stefaniuk (D3xter87)
+License:  MIT
+
+==============================================================================
+CONTENTS                                                     *review-contents*
+
+  1. Introduction ........................................ |review-intro|
+  2. Requirements ........................................ |review-requirements|
+  3. Installation ........................................ |review-installation|
+  4. Authentication ...................................... |review-auth|
+  5. Quick start ......................................... |review-quickstart|
+  6. Multi-session model ................................. |review-sessions|
+  7. Commands ............................................ |review-commands|
+       :Review .......................................... |:Review|
+       :ReviewOpen ...................................... |:ReviewOpen|
+       :ReviewApprove / :ReviewRevoke ................... |:ReviewApprove|
+       :ReviewMerge ..................................... |:ReviewMerge|
+       :ReviewRebase .................................... |:ReviewRebase|
+       :ReviewWeb ....................................... |:ReviewWeb|
+       :ReviewRequest / :ReviewMine ..................... |:ReviewRequest|
+       :ReviewClose ..................................... |:ReviewClose|
+       :ReviewInfo / :ReviewCommits / :ReviewNotes ...... |:ReviewInfo|
+  8. Bottom panel ........................................ |review-panel|
+  9. Diffview key-map .................................... |review-diff-keys|
+ 10. Notes panel key-map ................................. |review-notes-keys|
+ 11. Highlights .......................................... |review-highlights|
+ 12. Icons ............................................... |review-icons|
+ 13. Auto-merge watcher .................................. |review-auto-merge|
+ 14. Configuration ...................................... |review-config|
+ 15. Provider detection ................................. |review-providers|
+ 16. Lua API ............................................ |review-api|
+ 17. Troubleshooting .................................... |review-trouble|
+
+==============================================================================
+1. Introduction                                                 *review-intro*
+
+`review.nvim` runs an entire MR/PR review inside Neovim: it opens the diff
+under `diffview.nvim`, lays out a sliding bottom panel for commits / MR
+info / notes, and lets you approve, comment, suggest, resolve, rebase
+and merge -- all from inside the editor.
+
+Supported providers:
+
+  - GitLab (REST API v4) -- full feature set, including resolvable
+    discussion threads, suggestions with multi-line ranges, time tracking
+    and approval rules.
+  - GitHub (REST + minimal GraphQL) -- pull requests, three comment sources
+    unified into one panel, resolve via GraphQL, auto-merge via GraphQL.
+
+Multiple review sessions run concurrently (one per Neovim tab); see
+|review-sessions|.
+
+The plugin does not depend on `glab`, `gh`, or external HTTP libraries --
+just the system `curl` binary.
+
+==============================================================================
+2. Requirements                                          *review-requirements*
+
+  - Neovim 0.10 or newer.
+  - `curl` binary on PATH.
+  - `sindrets/diffview.nvim`.
+  - A git repository with an `origin` remote pointing at GitLab or GitHub
+    (HTTPS, SSH, or scp-style). The plugin uses `git remote get-url origin`
+    to detect host and project path.
+  - A personal access token (see |review-auth|).
+
+==============================================================================
+3. Installation                                          *review-installation*
+
+With `lazy.nvim`: >lua
+
+    {
+      "D3xter87/review.nvim",
+      dependencies = { "sindrets/diffview.nvim" },
+      cmd = {
+        "Review", "ReviewOpen",
+        "ReviewApprove", "ReviewRevoke",
+        "ReviewInfo", "ReviewCommits", "ReviewNotes",
+        "ReviewMerge", "ReviewRebase", "ReviewClose",
+      },
+      opts = {
+        -- see |review-config|
+      },
+    }
+<
+==============================================================================
+4. Authentication                                                *review-auth*
+
+Token lookup order (first hit wins):
+
+  1. `opts.providers[<name>].token` from `setup()`.
+  2. `~/.netrc` (or `%USERPROFILE%\_netrc` on Windows), keyed by host:
+     `gitlab.example.com` for self-hosted GitLab, `api.github.com` for
+     `github.com`.
+  3. Environment variables: `$GITLAB_TOKEN` / `$GITHUB_TOKEN`.
+
+GitLab token scopes: `api`. (`read_api` only is not enough for write
+operations: approve, comment, merge, etc.)
+
+GitHub token scopes: `repo` for private repositories, `public_repo` for
+public ones. The same token is used for REST and GraphQL.
+
+==============================================================================
+5. Quick start                                             *review-quickstart*
+
+  1. Check out a branch that has an open MR/PR. >
+       git checkout feature/foo
+<  2. Open the review session: >
+       :Review
+<     If the branch has multiple open MR/PRs, a |vim.ui.select| picker
+     appears. The diff opens in a new tab via `:DiffviewOpen base...head`,
+     and a bottom split shows the MR info (Title, Description, ...).
+  3. Switch the bottom panel mode: >
+       :ReviewInfo      " title, description, assignees, labels, ...
+       :ReviewCommits   " commit list -- <CR> opens a commit diff
+       :ReviewNotes     " all comments, suggestions, replies
+<  4. Inside the diff, select a range in visual mode and press: >
+       c   " add an inline comment
+       s   " add an inline suggestion (input is prefilled with selected lines)
+<  5. End the session by pressing `q` in the bottom panel, or by closing
+     the diffview tab.
+
+==============================================================================
+6. Multi-session model                                       *review-sessions*
+
+Every `:Review` (or `:ReviewOpen`) creates an independent session in a new
+diffview tab. Sessions coexist:
+
+  - Run `:Review !100` -> session for !100 lives in tab 2.
+  - Run `:Review !200` -> session for !200 lives in tab 3.
+  - Both stay alive; switching tabs switches which session is "active".
+
+The "active session" is the one in the currently-focused tab. When you run
+a subcommand without arguments, it operates on the active session:
+
+  - `:ReviewApprove` (in tab 2) -> approves !100.
+  - `:ReviewMerge`   (in tab 3) -> opens merge dialog for !200.
+
+Subcommands also accept a target argument (`!iid` or `branch`). With an
+argument they operate "out-of-band" on that MR -- the active session is
+left untouched. UI commands (|:ReviewInfo|, |:ReviewCommits|, |:ReviewNotes|)
+treat an argument specially:
+
+  - If a session for the target MR already exists, focus its tab and switch
+    its panel mode.
+  - If no session exists yet, start a brand-new session pre-set to that
+    panel mode (so `:ReviewNotes !100` is a one-shot "open !100 with the
+    Notes panel up front").
+
+When invoked from a non-review tab without an argument, UI commands behave
+like `:Review` and discover an MR for the current branch.
+
+Closing a session (q in panel, :tabclose, :ReviewClose) tears down ONLY
+that session -- other sessions in other tabs are unaffected.
+
+==============================================================================
+7. Commands                                                  *review-commands*
+
+All action commands accept `[branch|!iid]` as an argument unless noted.
+
+  - `branch`  -- name of a local or `origin/`-tracked branch (with
+                 completion).
+  - `!<iid>`  -- target a specific MR/PR by its internal id, e.g. `!319`.
+
+------------------------------------------------------------------------------
+                                                                     *:Review*
+:Review [{branch}|!{iid}]                       ~
+
+  Start a review session. Without an argument, uses the current branch
+  and lists ALL MRs for it (opened / closed / merged) via |vim.ui.select|
+  formatted as `!iid [state] title @author`. Any state can be selected --
+  closed and merged sessions open in read-only mode (the forge will reject
+  write ops like comment / approve on them; the plugin surfaces those
+  errors verbatim).
+
+  With multiple sessions running, multiple `:Review` invocations build up
+  multiple tabs. If the target MR already has a session, that tab is
+  focused instead of duplicating.
+
+  Use |:ReviewOpen| / |:ReviewClose| for the state-change write ops, and
+  |:ReviewWeb| to jump straight to the forge's web UI.
+
+------------------------------------------------------------------------------
+                                                                 *:ReviewOpen*
+:ReviewOpen [{branch}|!{iid}]                   ~
+
+  Reopen a *closed* MR/PR and start a review session for it. Without an
+  argument, lists closed MRs of the current branch.
+
+------------------------------------------------------------------------------
+                                                              *:ReviewApprove*
+                                                               *:ReviewRevoke*
+:ReviewApprove [{branch}|!{iid}]                ~
+:ReviewRevoke  [{branch}|!{iid}]                ~
+
+  Approve or revoke approval. Behaviour matrix:
+
+    Active session, no arg     -> act on the active session's MR.
+    Active session, with arg   -> act on the target -- the active session
+                                  is NOT closed and not refreshed.
+    No active session, no arg  -> discover open MRs on current branch
+                                  (picker if >1) -> act on chosen MR.
+    No active session, arg     -> resolve target -> act.
+
+  GitHub revoke dismisses the latest APPROVED review by the current user
+  via the dismissals endpoint.
+
+------------------------------------------------------------------------------
+                                                                *:ReviewMerge*
+:ReviewMerge [{branch}|!{iid}]                  ~
+
+  Open the merge dialog (floating window) for the active session, the
+  picked MR, or the target.
+
+  The dialog has three checkboxes -- Delete source branch, Squash commits,
+  Edit commit message -- and two action lines:
+
+    Merge now                       -- immediate `PUT /merge`.
+    Set auto-merge (after pipeline) -- GitLab `merge_when_pipeline_succeeds`,
+                                       GitHub `enablePullRequestAutoMerge`
+                                       (GraphQL).
+
+  Inside the dialog: `<Space>` toggle, `<CR>` activate (toggle on
+  checkbox / submit on action), `<Esc>`/`<C-c>`/`q` cancel.
+
+  After a successful immediate merge, if the target was the active
+  session, the local session (diffview tab + bottom panel) is torn down.
+  Out-of-band merges leave any active session intact.
+
+  Auto-merge starts a background watcher (see |review-auto-merge|) that
+  notifies you when the merge eventually lands or the pipeline fails.
+
+------------------------------------------------------------------------------
+                                                               *:ReviewRebase*
+:ReviewRebase [{branch}|!{iid}]                 ~
+
+  Rebase the MR/PR's source branch onto its target and push the rewritten
+  history with `--force-with-lease`. Runs in a dedicated git worktree at
+  `<repo>/.git/review-rebase/<sanitized_source>` so the user's currently-
+  checked-out branch is not touched -- you can keep editing branch A while
+  rebasing branch B.
+
+  Conflict flow:
+    * A new tab opens with `:tcd <worktree>` and `:DiffviewOpen` (merge
+      view, configured via `merge_tool.layout = "diff4_mixed"`).
+    * Resolve, `git add`, then close the tab. The plugin runs
+      `git rebase --continue` automatically; further conflicts re-open
+      the tab.
+    * Close the tab with conflicts still unresolved -> `git rebase --abort`
+      runs automatically.
+    * No `:ReviewRebaseContinue` / `:ReviewRebaseAbort` -- closing the
+      tab is the trigger.
+
+  Special case: when the MR's source branch IS the user's current branch,
+  a worktree can't be created (already checked out). The plugin falls
+  back to an in-place rebase in the main repo.
+
+  Multiple parallel rebases on different branches of the same repo are
+  supported (per-branch worktree paths, per-tab autocmd groups).
+
+------------------------------------------------------------------------------
+                                                                  *:ReviewWeb*
+:ReviewWeb [{branch}|!{iid}]                    ~
+
+  Open the MR/PR's web URL (`mr.web_url`) in the system default browser.
+  Uses |vim.ui.open()| on Neovim 0.10+, with platform-specific fallbacks
+  (`open` on macOS, `xdg-open` on Linux, `rundll32 url.dll,...` on
+  Windows). Without an argument, targets the active session; with an
+  argument, accepts any state (opened / closed / merged) — handy for
+  pulling up a historical PR.
+
+------------------------------------------------------------------------------
+                                                              *:ReviewRequest*
+                                                                 *:ReviewMine*
+:ReviewRequest                                  ~
+:ReviewMine                                     ~
+
+  Discovery commands -- no argument. They query the current repo for MRs/PRs
+  related to YOU, list them via |vim.ui.select| (auto-open on a single
+  result, notify when none), and start a review session for the chosen one
+  (focusing an existing tab if that MR is already open).
+
+  `:ReviewRequest`  open MRs/PRs where you are a requested reviewer.
+  `:ReviewMine`     open MRs/PRs that are yours -- you're the assignee OR
+                    the author (deduplicated).
+
+  Both list only `state=opened` items. Backend:
+    GitLab  -- `reviewer_username` (request) / `assignee_username` +
+               `author_username` merged (mine). Needs `GET /user` once
+               (cached per session).
+    GitHub  -- Search API `/search/issues` with `review-requested:@me`
+               (request) / `assignee:@me` + `author:@me` merged (mine).
+
+------------------------------------------------------------------------------
+                                                                *:ReviewClose*
+:ReviewClose [{branch}|!{iid}]                  ~
+
+  Close the MR. Opens an input prompt -- any non-empty body is posted as a
+  global discussion before the close call; an empty body closes silently.
+
+  Like `:ReviewMerge`, when the target is the active session the local
+  session is also torn down.
+
+------------------------------------------------------------------------------
+                                                                 *:ReviewInfo*
+                                                              *:ReviewCommits*
+                                                                *:ReviewNotes*
+:ReviewInfo [{branch}|!{iid}]                   ~
+:ReviewCommits [{branch}|!{iid}]                ~
+:ReviewNotes [{branch}|!{iid}]                  ~
+
+  In a review tab without an argument: switch the bottom panel mode (info
+  / commits / notes).
+
+  In a review tab WITH an argument, or in any other tab: behave as
+  "find-or-start". If a session for the target MR already exists in some
+  other tab, focus that tab and set its panel mode to the requested one.
+  Otherwise start a brand-new session pre-set to that mode -- so
+  `:ReviewNotes !100` is the one-shot equivalent of `:Review !100` +
+  `:ReviewNotes`.
+
+  In a non-review tab without an argument: behave like `:Review`,
+  discovering an MR for the current branch and opening it with the
+  corresponding panel mode.
+
+==============================================================================
+8. Bottom panel                                                *review-panel*
+
+The bottom panel is a `botright split` (default 12 lines tall). It has
+three modes; switching modes preserves the panel buffer/window.
+
+The header line shows: !iid . author . source -> target . state . approval
+. ready-to-merge. Approval and ready-to-merge segments only appear when
+the provider has populated them; ready-to-merge is mapped from
+`detailed_merge_status` (GitLab) or `merge_status` (GitHub) into a
+one-token blocker label.
+
+INFO ~
+
+  Multi-section view of the MR's metadata. Each editable section has a
+  marker -- press `e` while the cursor is inside it:
+
+    Draft           toggle (no input -- flips draft state).
+                    GitLab encodes draft as a `Draft:` prefix in the title;
+                    we strip the prefix in display and re-add it on title
+                    edits when needed.
+                    GitHub uses GraphQL mutations
+                    `markPullRequestReadyForReview` /
+                    `convertPullRequestToDraft`.
+    Title           text input (single line).
+    Target branch   single-select picker over the repo's remote branches
+                    (source branch filtered out). Re-points the MR/PR at
+                    the chosen branch.
+    Description     text input (multi-line).
+    Assignees       multi-select picker (project members).
+    Reviewers       multi-select picker.
+    Labels          multi-select picker.
+    Milestone       single-select picker.
+    Time tracking   text input -- set time estimate (e.g. `3h30m`); empty
+                    resets. *Hidden when the provider has no time tracking
+                    (GitHub).*
+    Participants    read-only.
+
+  This is the default mode for new sessions.
+
+COMMITS ~
+
+  List of commits in the MR with `sha . author . subject`. Press `<CR>`
+  on a line to open just that commit's diff via `:DiffviewOpen <sha>^!`.
+
+NOTES ~
+
+  All comments / suggestions / reviews-with-body. The winbar shows
+  `unresolved/total` plus a status icon (see |review-icons|). Threads can
+  be resolved (GitLab) or marked resolved via GraphQL (GitHub).
+
+Always-on key-map ~
+
+These keys work in every mode while the panel has focus:
+
+  ]              switch to the next mode (info -> commits -> notes -> info)
+  [              switch to the previous mode (info -> notes -> commits -> info)
+  q              end the review session
+
+The mode-specific keys (`e` in Info, `<CR>` / `a` / `d` / etc. in Notes,
+see |review-notes-keys|) are wired only for their own mode and cleared on
+mode change. `]` / `[` and `q` persist across mode switches so muscle
+memory carries over.
+
+==============================================================================
+9. Diffview key-map                                         *review-diff-keys*
+
+Diffview content buffers are forced read-only while a session is active.
+In *visual mode* you get two extra mappings:
+
+  c    add a line/range comment
+  s    add a suggestion. The input is prefilled with the selected lines so
+       you edit the existing code; on submit it's wrapped in a
+       ```suggestion fenced block.
+
+The plugin auto-scrolls the |:ReviewNotes| panel as the cursor moves
+through the diff: when a comment is anchored to the cursor's line, the
+panel jumps to that thread.
+
+==============================================================================
+10. Notes panel key-map                                    *review-notes-keys*
+
+Inside `:ReviewNotes`:
+
+  <CR>           jump to the file/line in the diff
+  a              add a reply (inline thread -> threaded reply, global note
+                 -> new global comment)
+  d              delete the note under the cursor (works on root and on
+                 individual replies)
+  e              edit the note under the cursor
+  c              add a new global comment (no anchor)
+  r              toggle resolve on the thread under the cursor
+  R              toggle resolve all (resolve all unresolved; if all are
+                 resolved, unresolve them)
+  s              cycle sort order: status -> file -> date -> author. The
+                 winbar shows the active mode as `sort: <name>`.
+  q              end the review session
+
+Folding ~
+
+The Notes panel uses native vim folds (`foldmethod=expr`). Each thread is
+one fold (head + body + replies). All commands work as usual: `za`, `zo`,
+`zc`, `zC`, `zO`, `zM` (close all), `zR` (open all).
+
+Default state is "all collapsed" (`foldlevel=0`). When the cursor moves
+in the diffview content windows, the notes panel auto-syncs:
+
+  * Cursor lands on a line that has a comment   -> all folds collapse,
+                                                   then ONLY that thread
+                                                   expands (`zMzv`).
+  * Cursor lands on a line without a comment    -> all folds collapse.
+
+Manual `zo` / `zR` from inside the panel still works. The next CursorMoved
+event in diffview will re-sync.
+
+==============================================================================
+11. Highlights                                              *review-highlights*
+
+The bottom panel is colored via dedicated highlight groups, each linked
+to a sensible default with `default = true` -- override in your colorscheme
+or set them yourself with `vim.api.nvim_set_hl(0, <group>, {...})`.
+
+  ReviewIid             `Number`           !iid markers
+  ReviewAuthor          `Identifier`       @username tokens
+  ReviewBranch          `Type`             source / target branch names
+  ReviewSha             `Number`           commit SHAs (commits panel)
+  ReviewState           `Constant`         opened / merged / closed
+  ReviewSectionHeader   `Title`            "-- Title --" section dividers
+  ReviewApprovalOk      `DiagnosticOk`     "approved (N/M)" when satisfied
+  ReviewApprovalMissing `DiagnosticWarn`   "not approved", under-quorum
+  ReviewReady           `DiagnosticOk`     "ready to merge"
+  ReviewBlocker         `DiagnosticWarn`   "needs pipeline", "conflicts", ...
+  ReviewDraft           `Special`          draft section "[x] yes" / "[ ] no"
+  ReviewIconComment     `DiagnosticInfo`   speech-bubble note icon
+  ReviewIconUnresolved  `DiagnosticError`  cross-mark thread icon
+  ReviewIconResolved    `DiagnosticOk`     check-mark thread icon
+  ReviewPath            `Directory`        file paths in note headers
+  ReviewLine            `Number`           line numbers in note headers
+  ReviewMuted           `Comment`          "(global)", "(none)", "(empty)"
+
+==============================================================================
+12. Icons                                                       *review-icons*
+
+Bottom panel and diff gutter use three icons (rendered as Unicode emoji
+at runtime: speech-bubble, cross-mark, check-mark):
+
+  speech-bubble   non-resolvable note (issue comment / review summary /
+                  individual note) -- informational only.
+  cross-mark      resolvable thread, at least one note unresolved.
+  check-mark      resolvable thread, fully resolved.
+
+The Notes winbar shows `<unresolved>/<total>` plus the matching status
+icon.
+
+==============================================================================
+13. Auto-merge watcher                                     *review-auto-merge*
+
+When you pick "Set auto-merge" in the |:ReviewMerge| dialog, the MR is
+left in the forge's "merge after pipeline" queue. The plugin's
+auto-merge watcher polls the MR in the background and notifies you when
+one of three terminal events happens:
+
+  * MR transitions to `merged`            -> "auto-merge completed"
+  * MR transitions to `closed`            -> "closed before auto-merge"
+  * `merge_when_pipeline_succeeds` flips
+    back to false (pipeline failure or
+    manual cancel)                        -> "auto-merge cancelled"
+
+The watcher survives review-session teardown -- you can close the
+diffview tab right after scheduling and still get the verdict.
+
+Tunable via |review-config|:
+
+    auto_merge_watcher.enabled           -- default true
+    auto_merge_watcher.poll_interval_ms  -- default 30 000  (30 s)
+    auto_merge_watcher.timeout_ms        -- default 3 600 000 (1 h)
+
+==============================================================================
+14. Configuration                                              *review-config*
+
+Defaults: >lua
+
+  {
+    -- Provider tokens (rarely needed -- prefer ~/.netrc or env vars).
+    providers = {
+      -- gitlab = { token = "glpat-..." },
+      -- github = { token = "ghp-..." },
+    },
+
+    -- Force a provider for unusual hostnames.
+    host_providers = {
+      -- ["ghes.corp"] = "github",
+    },
+
+    -- Override the API URL scheme per host.
+    host_schemes = {
+      -- ["gitlab.intranet"] = "http",
+    },
+
+    -- Full base URL override (GitHub Enterprise).
+    -- The plugin derives the GraphQL endpoint as <base>/graphql.
+    host_bases = {
+      -- ["ghe.corp"] = "https://ghe.corp/api/v3",
+    },
+
+    -- Bottom panel height (lines).
+    panel = { height = 12 },
+
+    -- Notification verbosity:
+    --   "quiet"   (default) -- only event confirmations ("!42 merged"),
+    --                          warnings, and errors. Progress chatter
+    --                          ("looking up MRs...", "merging...",
+    --                          "scheduling auto-merge...") is hidden.
+    --   "verbose"           -- also show progress messages.
+    notify = "quiet",
+
+    -- Background watcher started after :ReviewMerge -> "Set auto-merge".
+    -- See |review-auto-merge| for details.
+    auto_merge_watcher = {
+      enabled          = true,
+      poll_interval_ms = 30 * 1000,
+      timeout_ms       = 60 * 60 * 1000,
+    },
+
+    debug = false,
+  }
+<
+==============================================================================
+15. Provider detection                                      *review-providers*
+
+Same scheme as |cicd|:
+
+  1. `cfg.host_providers[host]` if set.
+  2. `github.com` or `^ghes%.` hostnames -> `github`.
+  3. Hostnames starting with or containing `gitlab` -> `gitlab`.
+  4. Fallback -> `gitlab`.
+
+==============================================================================
+16. Lua API                                                       *review-api*
+
+                                                            *review.setup()*
+require("review").setup({opts})                 ~
+
+  Apply user configuration. See |review-config|.
+
+                                                             *review.open()*
+require("review").open({opts})                  ~
+
+  Start (or focus) a review session. `opts` is `{ branch = "..." }` or
+  `{ iid = N }`. Same as |:Review| with the corresponding argument.
+
+==============================================================================
+17. Troubleshooting                                           *review-trouble*
+
+"HTTP 422" from `:ReviewApprove` (GitHub):
+    Most common cause: GitHub forbids approving your own PR. The plugin
+    surfaces the message verbatim ("Validation Failed: Can not approve
+    your own pull request"). Other 422s: PR is in draft, you have already
+    approved, or token scope is too narrow.
+
+"GitHub: this thread isn't resolvable":
+    The discussion is an issue comment or a review summary -- only inline
+    review threads have a resolve lifecycle.
+
+`:ReviewMerge` shows "Pipeline must pass before merge...":
+    The merge dialog detects a blocking state and surfaces it. "Set
+    auto-merge" schedules the merge for after the pipeline succeeds.
+
+"git fetch failed: ..." from `:ReviewRebase`:
+    The rebase aborts on fetch failure to avoid silently rebasing against
+    stale local refs (which would miss recently-merged target branches).
+    Check VPN / network and retry.
+
+Closing the diffview tab kills Neovim:
+    Should be impossible -- the plugin opens a fallback empty tab if the
+    diffview tab is the last one before tearing down. If you still hit
+    this, please file an issue with reproduction steps.
+
+The "session closed" notification doesn't show after :ReviewMerge:
+    Your notify plugin (e.g. noice, snacks) may be coalescing closely-
+    timed messages. The plugin schedules the close-confirmation through
+    `vim.schedule` to give the previous notify time to render. If you
+    still don't see it, try `notify = "quiet"` to reduce the volume of
+    upstream messages.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
