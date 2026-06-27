@@ -62,6 +62,9 @@ function M.open(opts)
 
   local function submit()
     local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    -- Leave insert mode before closing, so submitting via <C-s> from insert
+    -- doesn't leave the underlying buffer stuck in insert mode.
+    vim.cmd("stopinsert")
     close()
     opts.on_submit(lines)
   end
