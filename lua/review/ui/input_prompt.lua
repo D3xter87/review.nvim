@@ -1,6 +1,10 @@
--- Floating multi-line input. Submit only in normal mode via <CR>, so that
--- <CR> in insert mode still inserts a newline (the body is markdown). Cancel
--- via <Esc>/<C-c>/q in normal mode.
+-- Floating multi-line input. Submit in normal mode via <CR> (so <CR> in insert
+-- mode still inserts a newline — the body is markdown), or via <C-s> in either
+-- normal or insert mode (like lazygit's commit). Cancel via <Esc>/<C-c>/q in
+-- normal mode.
+--
+-- NOTE: <C-s> in a terminal is swallowed by TTY flow control (XOFF) unless the
+-- user runs `stty -ixon`. It works out of the box in GUIs (Neovide, etc.).
 
 local M = {}
 
@@ -39,7 +43,7 @@ function M.open(opts)
     col = col,
     style = "minimal",
     border = "rounded",
-    title = " " .. title:gsub("^%s+", ""):gsub("%s+$", "") .. "  (n: <CR>=submit  <Esc>/<C-c>/q=cancel) ",
+    title = " " .. title:gsub("^%s+", ""):gsub("%s+$", "") .. "  (<C-s>=submit  n: <CR>=submit  <Esc>/<C-c>/q=cancel) ",
     title_pos = "center",
   })
 
@@ -69,6 +73,8 @@ function M.open(opts)
 
   local map_opts = { buffer = buf, silent = true, noremap = true, nowait = true }
   vim.keymap.set("n", "<CR>", submit, map_opts)
+  -- <C-s> submits from both normal and insert mode (lazygit-style commit).
+  vim.keymap.set({ "n", "i" }, "<C-s>", submit, map_opts)
   vim.keymap.set("n", "<Esc>", cancel, map_opts)
   vim.keymap.set("n", "<C-c>", cancel, map_opts)
   vim.keymap.set("n", "q", cancel, map_opts)
