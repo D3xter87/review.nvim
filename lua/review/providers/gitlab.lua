@@ -778,10 +778,24 @@ function M.delete_note(remote, iid, discussion_id, note_id, cb)
 end
 
 ---Builds the position dict required by GitLab for inline comments.
+---
+---GitLab anchors a note on a single line and (for suggestions) extends N lines
+---DOWN from it via the fence, so when `start_line` is present we anchor on the
+---START of the range (using its old_line for the line_code). For a context
+---(unchanged) line GitLab needs BOTH old_line and new_line to form a valid
+---line_code, so callers pass old_line for those.
 ---@param mr table  normalized MR (must include base_sha/head_sha/start_sha)
----@param opts { new_path: string, old_path: string|nil, new_line: integer|nil, old_line: integer|nil }
+---@param opts { new_path: string, old_path: string|nil, new_line: integer|nil, old_line: integer|nil, side: string|nil, start_line: integer|nil, start_old_line: integer|nil }
 ---@return table
 function M.build_position(mr, opts)
+  local new_line, old_line
+  if opts.start_line then
+    new_line = opts.start_line
+    old_line = opts.start_old_line
+  else
+    new_line = opts.new_line
+    old_line = opts.old_line
+  end
   return {
     base_sha = mr.base_sha,
     head_sha = mr.head_sha,
@@ -789,8 +803,8 @@ function M.build_position(mr, opts)
     position_type = "text",
     new_path = opts.new_path,
     old_path = opts.old_path or opts.new_path,
-    new_line = opts.new_line,
-    old_line = opts.old_line,
+    new_line = new_line,
+    old_line = old_line,
   }
 end
 

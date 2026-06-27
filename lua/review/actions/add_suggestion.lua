@@ -7,6 +7,8 @@ local M = {}
 local controller = require("review.controller")
 local diffview_int = require("review.diffview.integration")
 local input_prompt = require("review.ui.input_prompt")
+local visual = require("review.util.visual")
+local hunks = require("review.util.hunks")
 
 local notify_util = require("review.util.notify")
 local function notify(msg, level) notify_util.legacy(msg, level) end
@@ -25,24 +27,42 @@ function M.run()
     return
   end
 
-  local s_pos = vim.fn.getpos("'<")
-  local e_pos = vim.fn.getpos("'>")
-  local start_line = s_pos[2]
-  local end_line = e_pos[2]
-  if start_line == 0 or end_line == 0 then
+  local start_line, end_line = visual.range()
+  if not start_line then
     notify("no visual selection", vim.log.levels.WARN)
     return
   end
+
+  -- Clamp the selection into a single diff hunk so the suggestion range stays
+  -- valid (and the prefill matches what's actually being commented on).
+  local ranges = hunks.ranges(ctx.mr.base_sha, ctx.mr.head_sha, target.path, "new")
+  local cs, ce, adjusted = hunks.clamp(ranges, start_line, end_line)
+  if not cs then
+    notify("selection is outside the diff", vim.log.levels.WARN)
+    return
+  end
+  if adjusted then
+    notify_util.progress("review: selection adjusted to lines " .. cs .. "-" .. ce)
+  end
+  start_line, end_line = cs, ce
 
   local bufnr = vim.api.nvim_get_current_buf()
   local lines = vim.api.nvim_buf_get_lines(bufnr, start_line - 1, end_line, false)
   local extra = end_line - start_line   -- N in suggestion:-0+N
 
-  -- start_line is read by the GitHub provider for multi-line ranges; the
-  -- GitLab provider ignores it (multi-line is encoded in the suggestion fence).
+  -- Position opts for both ends. GitHub anchors on the END line and encodes the
+  -- range via start_line; GitLab anchors on the START line and extends N lines
+  -- down via the fence (so start_old_line carries the anchor's old_line for a
+  -- valid line_code on context lines).
+  local start_anchor = hunks.pos(ctx.mr.base_sha, ctx.mr.head_sha, target.path, "new", start_line)
+      or { new_line = start_line }
+  local end_anchor = hunks.pos(ctx.mr.base_sha, ctx.mr.head_sha, target.path, "new", end_line)
+      or { new_line = end_line }
   local position = ctx.provider.build_position(ctx.mr, {
     new_path = target.path, old_path = target.path,
-    new_line = end_line, start_line = start_line,
+    side = "new",
+    new_line = end_line, old_line = end_anchor.old_line,
+    start_line = start_line, start_old_line = start_anchor.old_line,
   })
 
   input_prompt.open({

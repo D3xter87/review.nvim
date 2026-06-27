@@ -1201,11 +1201,17 @@ end
 ---Builds the inline-comment payload for POST /pulls/:n/comments. Multi-line
 ---ranges encode start_line/start_side; single line just sets line/side.
 function M.build_position(mr, opts)
+  -- Prefer the explicit side hint; fall back to inferring from which line is
+  -- set (callers may now pass BOTH lines for context lines, so the hint avoids
+  -- mis-detecting the side).
   local side
-  if opts.new_line then side = "RIGHT"
+  if opts.side == "new" then side = "RIGHT"
+  elseif opts.side == "old" then side = "LEFT"
+  elseif opts.new_line then side = "RIGHT"
   elseif opts.old_line then side = "LEFT"
   else side = "RIGHT" end
-  local line = opts.new_line or opts.old_line
+  local line = (side == "RIGHT") and (opts.new_line or opts.old_line)
+      or (opts.old_line or opts.new_line)
 
   local pos = {
     commit_id = mr.head_sha,

@@ -101,10 +101,12 @@ local function setup_visual_keymaps()
   if vim.fn.exists("#" .. VISUAL_AUGROUP) == 1 then return end
 
   local actions_add_comment = function()
-    require("review.actions.add_comment").run()
+    local ok, err = pcall(function() require("review.actions.add_comment").run() end)
+    if not ok then notify_util.err("review: " .. tostring(err)) end
   end
   local actions_add_suggestion = function()
-    require("review.actions.add_suggestion").run()
+    local ok, err = pcall(function() require("review.actions.add_suggestion").run() end)
+    if not ok then notify_util.err("review: " .. tostring(err)) end
   end
 
   local group = vim.api.nvim_create_augroup(VISUAL_AUGROUP, { clear = true })
