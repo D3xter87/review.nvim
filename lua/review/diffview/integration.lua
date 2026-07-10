@@ -5,17 +5,111 @@
 local M = {}
 
 local state_mod = require("review.state")
+local git = require("review.git.rebase")
+local notify_util = require("review.util.notify")
 
----Opens DiffviewOpen for the MR's base...head range.
+---Verifies a rev resolves to a commit in the local object store.
+---@param repo string  repo root (for -C)
+---@param sha string
+---@param cb fun(present: boolean)
+local function rev_present(repo, sha, cb)
+  git._run({ "git", "-C", repo, "rev-parse", "-q", "--verify", sha .. "^{commit}" },
+    nil, nil, function(res) cb(res.ok) end)
+end
+
+---Ensures base_sha and head_sha exist locally, fetching them from origin when
+---they don't. When reviewing someone else's MR (e.g. via :ReviewRequest) the
+---source branch is usually not present locally, so the SHAs GitLab reports in
+---diff_refs aren't in the object store and DiffviewOpen fails with
+---"Not a valid commit name". The merge-base (base_sha) is an ancestor of the
+---source branch tip, so fetching source + target branches brings both revs.
+---@param repo string  repo root the commits must live in
+---@param mr table  normalized MR with base_sha/head_sha + source/target branch
+---@param cb fun(ok: boolean, err: string|nil)
+local function ensure_revs(repo, mr, cb)
+  rev_present(repo, mr.base_sha, function(base_ok)
+    rev_present(repo, mr.head_sha, function(head_ok)
+      if base_ok and head_ok then return cb(true) end
+
+      notify_util.progress("fetching MR commits...")
+      local args = { "git", "-C", repo, "fetch", "origin" }
+      if mr.source_branch then table.insert(args, mr.source_branch) end
+      if mr.target_branch and mr.target_branch ~= mr.source_branch then
+        table.insert(args, mr.target_branch)
+      end
+
+      git._run(args, nil, nil, function(fres)
+        if not fres.ok then
+          return cb(false, "git fetch failed: " ..
+            ((fres.stderr or "(no stderr)"):gsub("%s+$", "")) ..
+            " - check your network / VPN and retry")
+        end
+        -- Re-verify: a successful fetch doesn't guarantee the exact SHAs are
+        -- reachable (e.g. the source branch was force-pushed or deleted).
+        rev_present(repo, mr.base_sha, function(b2)
+          rev_present(repo, mr.head_sha, function(h2)
+            if b2 and h2 then return cb(true) end
+            cb(false, "MR commits not found on origin after fetch " ..
+              "(source branch may have been deleted or force-pushed)")
+          end)
+        end)
+      end)
+    end)
+  end)
+end
+
+---Opens DiffviewOpen for the MR's base...head range. Fetches the commits from
+---origin first when they aren't present locally, and pins diffview to the
+---resolved repo with `-C`. Async: `cb(ok, err)`.
+---
+---The `-C<repo>` is essential inside git submodules: without it diffview infers
+---the repo from the active buffer / cwd, which for a submodule working tree can
+---resolve to the SUPERPROJECT — whose object store doesn't contain the MR's
+---commits — so `git merge-base base head` fails with "Not a valid commit name"
+---and the diff never opens. Pinning to `repo` (where we just verified the
+---commits exist) makes it deterministic.
 ---@param mr table  normalized MR with base_sha + head_sha
-function M.open(mr)
+---@param cb fun(ok: boolean, err: string|nil)
+function M.open(mr, cb)
   if not mr or not mr.base_sha or not mr.head_sha then
-    return false, "MR is missing base/head sha"
+    return cb(false, "MR is missing base/head sha")
   end
-  local cmd = string.format("DiffviewOpen %s...%s", mr.base_sha, mr.head_sha)
+  local repo = git.repo_root()
+  if not repo then return cb(false, "not a git repository") end
+
+  ensure_revs(repo, mr, function(ok, err)
+    if not ok then return cb(false, err) end
+
+    local cmd = string.format("DiffviewOpen -C%s %s...%s",
+      vim.fn.fnameescape(repo), mr.base_sha, mr.head_sha)
+    local vok, verr = pcall(vim.cmd, cmd)
+    if not vok then return cb(false, tostring(verr)) end
+
+    -- diffview logs rev-parse failures instead of raising them, so a
+    -- successful pcall doesn't mean a view opened. Confirm one did, otherwise
+    -- report a real error instead of silently leaving the session diff-less.
+    local lok, lib = pcall(require, "diffview.lib")
+    if lok and not lib.get_current_view() then
+      return cb(false, "diffview did not open the diff (see :messages)")
+    end
+
+    state_mod.state.diffview_tabnr = vim.api.nvim_get_current_tabpage()
+    cb(true)
+  end)
+end
+
+---Runs `DiffviewOpen <rev_arg>` pinned to the current repo via `-C`, so it
+---works inside git submodules (see M.open for why). Best-effort — used for the
+---"open a single commit's diff" panel action. Returns false + err on failure.
+---@param rev_arg string  e.g. "<sha>^!"
+---@return boolean ok, string|nil err
+function M.open_rev(rev_arg)
+  local repo = git.repo_root()
+  local cmd = repo
+    and string.format("DiffviewOpen -C%s %s", vim.fn.fnameescape(repo), rev_arg)
+    or ("DiffviewOpen " .. rev_arg)
   local ok, err = pcall(vim.cmd, cmd)
   if not ok then return false, tostring(err) end
-  state_mod.state.diffview_tabnr = vim.api.nvim_get_current_tabpage()
   return true
 end
 

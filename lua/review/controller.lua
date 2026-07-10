@@ -288,7 +288,7 @@ end
 local function wire_panel_hooks()
   bottom_panel.hooks.on_close = function() M.close() end
   bottom_panel.hooks.on_commit_open = function(sha)
-    pcall(vim.cmd, "DiffviewOpen " .. sha .. "^!")
+    diffview_int.open_rev(sha .. "^!")
   end
   bottom_panel.hooks.on_section_edit = function(section_id)
     require("review.actions.edit_section").run(section_id)
@@ -347,38 +347,39 @@ end
 local function start_session(provider, remote, branch, full, initial_mode)
   initial_mode = initial_mode or "info"
 
-  local ok, err = diffview_int.open(full.mr)
-  if not ok then
-    notify((err or "failed to open diffview"), vim.log.levels.ERROR)
-    return
-  end
-  local tabnr = vim.api.nvim_get_current_tabpage()
+  diffview_int.open(full.mr, function(ok, err)
+    if not ok then
+      notify((err or "failed to open diffview"), vim.log.levels.ERROR)
+      return
+    end
+    local tabnr = vim.api.nvim_get_current_tabpage()
 
-  local session = state_mod.create_for_tab(tabnr)
-  session.mr = full.mr
-  session.commits = full.commits
-  session.discussions = full.discussions
-  session.participants = full.participants or {}
-  session.branch = branch
-  session.provider_name = provider.name
+    local session = state_mod.create_for_tab(tabnr)
+    session.mr = full.mr
+    session.commits = full.commits
+    session.discussions = full.discussions
+    session.participants = full.participants or {}
+    session.branch = branch
+    session.provider_name = provider.name
 
-  ctx_by_tab[tabnr] = {
-    provider = provider,
-    remote = remote,
-    branch = branch,
-    mr = full.mr,
-    tabnr = tabnr,
-  }
+    ctx_by_tab[tabnr] = {
+      provider = provider,
+      remote = remote,
+      branch = branch,
+      mr = full.mr,
+      tabnr = tabnr,
+    }
 
-  readonly.apply()
-  setup_visual_keymaps()
-  setup_lifecycle_autocmds()
-  wire_panel_hooks()
-  bottom_panel.open(initial_mode)
-  highlights.refresh(full.discussions)
+    readonly.apply()
+    setup_visual_keymaps()
+    setup_lifecycle_autocmds()
+    wire_panel_hooks()
+    bottom_panel.open(initial_mode)
+    highlights.refresh(full.discussions)
 
-  notify(string.format("!%s opened (%s -> %s)",
-    tostring(full.mr.iid), full.mr.source_branch or "?", full.mr.target_branch or "?"))
+    notify(string.format("!%s opened (%s -> %s)",
+      tostring(full.mr.iid), full.mr.source_branch or "?", full.mr.target_branch or "?"))
+  end)
 end
 
 ---@param cb fun(provider: table|nil, remote: table|nil, err: string|nil)
