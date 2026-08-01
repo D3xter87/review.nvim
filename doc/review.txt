@@ -420,10 +420,11 @@ The bottom panel is a `botright split` (default 12 lines tall). It has
 three modes; switching modes preserves the panel buffer/window.
 
 The header line shows: !iid . author . source -> target . state . approval
-. ready-to-merge. Approval and ready-to-merge segments only appear when
-the provider has populated them; ready-to-merge is mapped from
+. ready-to-merge . auto-merge. Approval and ready-to-merge segments only
+appear when the provider has populated them; ready-to-merge is mapped from
 `detailed_merge_status` (GitLab) or `merge_status` (GitHub) into a
-one-token blocker label.
+one-token blocker label. The `auto-merge` marker appears only while an
+auto-merge is armed on the MR.
 
 INFO ~
 
@@ -437,6 +438,15 @@ INFO ~
                     GitHub uses GraphQL mutations
                     `markPullRequestReadyForReview` /
                     `convertPullRequestToDraft`.
+    Auto-merge      read-only. `[x] yes` when the MR is set to merge
+                    automatically once the pipeline / required checks pass,
+                    followed by the strategy and who armed it, e.g.
+                    `[x] yes -- when pipeline succeeds, set by @kate`.
+                    GitLab reads `merge_when_pipeline_succeeds` /
+                    `auto_merge_enabled` + `auto_merge_strategy`, GitHub the
+                    `auto_merge` object (strategy = merge method). Arm or
+                    cancel it from |:ReviewMerge|; see |review-auto-merge|
+                    for the notification that fires when it lands.
     Title           text input (single line).
     Target branch   single-select picker over the repo's remote branches
                     (source branch filtered out). Re-points the MR/PR at
@@ -587,6 +597,12 @@ one of three terminal events happens:
 
 The watcher survives review-session teardown -- you can close the
 diffview tab right after scheduling and still get the verdict.
+
+An armed auto-merge is also visible at any time in the Info panel: the
+header carries an `auto-merge` marker and the "Auto-merge" section spells
+out the strategy and who armed it (see |review-panel|). This works no
+matter who armed it -- a teammate arming it in the web UI shows up after
+the next MR refresh, not just auto-merges scheduled from this plugin.
 
 Tunable via |review-config|:
 

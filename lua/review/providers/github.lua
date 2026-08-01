@@ -231,11 +231,27 @@ local function normalize_milestone(raw)
   }
 end
 
+-- GitHub reports a pending auto-merge as an `auto_merge` object (null when
+-- not armed) carrying the user who enabled it and the merge method that will
+-- be used once the required checks pass.
+local function normalize_auto_merge(raw)
+  local am = nullable(raw.auto_merge)
+  if type(am) ~= "table" then return { enabled = false } end
+  local method = nullable(am.merge_method)
+  local enabled_by = nullable(am.enabled_by)
+  return {
+    enabled = true,
+    strategy = method and ("when checks pass (" .. method .. ")") or "when checks pass",
+    set_by = enabled_by and nullable(enabled_by.login) or nil,
+  }
+end
+
 ---Maps a GitHub PR object to our generic MR shape. time_stats=nil tells the
 ---panel to skip the Time tracking section (no GitHub equivalent).
 local function normalize_pr(raw)
   local head = raw.head or {}
   local base = raw.base or {}
+  local auto_merge = normalize_auto_merge(raw)
   local mergeable = nullable(raw.mergeable)
   local has_conflicts = mergeable == false
   local merge_status
@@ -266,7 +282,8 @@ local function normalize_pr(raw)
     has_conflicts = has_conflicts,
     sha = nullable(head.sha),
     squash = false,
-    merge_when_pipeline_succeeds = nullable(raw.auto_merge) ~= nil,
+    merge_when_pipeline_succeeds = auto_merge.enabled,
+    auto_merge = auto_merge,
     assignees = normalize_user_list(raw.assignees),
     reviewers = normalize_user_list(raw.requested_reviewers),
     labels = normalize_label_names(raw.labels),

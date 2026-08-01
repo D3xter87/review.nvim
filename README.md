@@ -23,6 +23,12 @@ with feature parity.
 - `:ReviewInfo` shows title, description, assignees, reviewers, labels,
   milestone, estimate + spent time (GitLab only), participants, draft
   toggle. Each section is editable (`e`) — text input or checkbox picker.
+- The Info panel also reports whether the MR is **armed for auto-merge**
+  (merge once the pipeline / required checks pass): an `auto-merge` marker
+  in the header plus an **Auto-merge** section with the strategy and who
+  armed it — `[x] yes — when pipeline succeeds, set by @kate`. Read-only;
+  arm or cancel it from `:ReviewMerge`. Works for auto-merges scheduled by
+  anyone, not just from this plugin.
 - Spent time is one input field prefilled with the current total, where the
   **sign picks the operation**: `1h30m` sets it, `+30m` adds, `-30m`
   subtracts, `0` clears. Reachable with `e` on the **Spent time** section

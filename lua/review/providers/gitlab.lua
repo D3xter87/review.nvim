@@ -110,6 +110,31 @@ local function normalize_time_stats(raw)
   }
 end
 
+-- GitLab exposes a pending auto-merge in two overlapping ways: the legacy
+-- `merge_when_pipeline_succeeds` boolean and the newer
+-- `auto_merge_enabled` + `auto_merge_strategy` pair. We accept either so the
+-- Info panel and the watcher keep working across GitLab versions.
+--
+-- `merge_user` is the user who merged the MR *or* the one who armed the
+-- auto-merge — for a still-open MR it can only mean the latter.
+local AUTO_MERGE_STRATEGY = {
+  merge_when_pipeline_succeeds              = "when pipeline succeeds",
+  merge_when_checks_pass                    = "when checks pass",
+  add_to_merge_train_when_pipeline_succeeds = "merge train, when pipeline succeeds",
+}
+
+local function normalize_auto_merge(raw)
+  local enabled = nullable(raw.merge_when_pipeline_succeeds) == true
+      or nullable(raw.auto_merge_enabled) == true
+  local strategy = nullable(raw.auto_merge_strategy)
+  local merge_user = nullable(raw.merge_user)
+  return {
+    enabled = enabled,
+    strategy = enabled and (AUTO_MERGE_STRATEGY[strategy] or strategy or "when pipeline succeeds") or nil,
+    set_by = enabled and merge_user and nullable(merge_user.username) or nil,
+  }
+end
+
 local function normalize_labels(raw)
   raw = nullable(raw)
   if type(raw) ~= "table" then return {} end
@@ -128,6 +153,7 @@ local function normalize_mr(raw)
       or nullable(raw.work_in_progress) == true
       or raw_title:match("^[Dd]raft:%s") ~= nil
   local clean_title = raw_title:gsub("^[Dd]raft:%s+", "")
+  local auto_merge = normalize_auto_merge(raw)
 
   return {
     iid = nullable(raw.iid),
@@ -148,7 +174,8 @@ local function normalize_mr(raw)
     has_conflicts = nullable(raw.has_conflicts) == true,
     sha = nullable(raw.sha),
     squash = nullable(raw.squash) == true,
-    merge_when_pipeline_succeeds = nullable(raw.merge_when_pipeline_succeeds) == true,
+    merge_when_pipeline_succeeds = auto_merge.enabled,
+    auto_merge = auto_merge,
     assignees = normalize_user_list(raw.assignees),
     reviewers = normalize_user_list(raw.reviewers),
     labels = normalize_labels(raw.labels),

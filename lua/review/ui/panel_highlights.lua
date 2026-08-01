@@ -24,6 +24,7 @@ local GROUPS = {
   ReviewReady           = "DiagnosticOk",
   ReviewBlocker         = "DiagnosticWarn",
   ReviewDraft           = "Special",
+  ReviewAutoMerge       = "DiagnosticInfo",
   ReviewIconComment     = "DiagnosticInfo",
   ReviewIconUnresolved  = "DiagnosticError",
   ReviewIconResolved    = "DiagnosticOk",
@@ -161,6 +162,10 @@ local function highlight_iid_header(buf, row, line)
     hl(buf, row, ms2 - 1, me2 - 1, ok and "ReviewApprovalOk" or "ReviewApprovalMissing")
   end
 
+  -- Auto-merge marker (only rendered when an auto-merge is armed).
+  local am = line:find("auto%-merge")
+  if am then hl(buf, row, am - 1, am - 1 + #"auto-merge", "ReviewAutoMerge") end
+
   -- Ready-state segment.
   for label in pairs(READY_OK) do
     local s = line:find(label, 1, true)
@@ -193,6 +198,10 @@ function M.apply_info(buf, lines, line_targets)
       -- Within section bodies, apply contextual highlights.
       if target.section == "draft" then
         hl_pattern(buf, row, line, "%[[ x]%]%s*%w+", "ReviewDraft")
+      elseif target.section == "auto_merge" then
+        hl_pattern(buf, row, line, "%[[ x]%]%s*%w+",
+          line:find("%[x%]") and "ReviewAutoMerge" or "ReviewMuted")
+        hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
       elseif target.section == "labels" or target.section == "milestone" or target.section == "assignees" or target.section == "reviewers" then
         hl_pattern(buf, row, line, "%(none%)", "ReviewMuted")
         hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")

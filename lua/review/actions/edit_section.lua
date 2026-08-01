@@ -279,8 +279,15 @@ local function edit_milestone()
   end)
 end
 
+-- Auto-merge is read-only in the panel: arming or cancelling it belongs to
+-- the merge dialog, which also collects the commit message / squash choice.
+local function explain_auto_merge()
+  notify("auto-merge is set from :ReviewMerge (\"Set auto-merge\")", vim.log.levels.INFO)
+end
+
 local DISPATCH = {
   draft = toggle_draft,
+  auto_merge = explain_auto_merge,
   title = edit_title,
   target_branch = edit_target_branch,
   description = edit_description,
