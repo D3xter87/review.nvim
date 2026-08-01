@@ -831,6 +831,18 @@ function M.set_time_estimate(_, _, _, cb)
   end)
 end
 
+function M.add_spent_time(_, _, _, cb)
+  vim.schedule(function()
+    cb(false, "GitHub has no time tracking — section is hidden")
+  end)
+end
+
+function M.reset_spent_time(_, _, cb)
+  vim.schedule(function()
+    cb(false, "GitHub has no time tracking — section is hidden")
+  end)
+end
+
 ---Toggles draft state via GraphQL. REST PATCH /pulls accepts `draft` only on
 ---creation; switching after the fact requires markPullRequestReadyForReview /
 ---convertPullRequestToDraft mutations.

@@ -45,6 +45,15 @@ local defaults = {
     timeout_ms       = 60 * 60 * 1000,  -- give up after 1 h
   },
 
+  -- Mirror the MR's total spent time into a trailer line at the very bottom of
+  -- the description: "refs CVNT-3456-FEAT #time 1h 30m" — the source branch
+  -- uppercased, plus the current total. Rewritten after every :ReviewTime /
+  -- panel "Spent time" edit, removed when the total hits zero. Off by default
+  -- — `refs ... #time ...` is an issue-tracker convention, not a GitLab one.
+  spent_time_refs_line = {
+    enabled = false,
+  },
+
   debug = false,
 }
 

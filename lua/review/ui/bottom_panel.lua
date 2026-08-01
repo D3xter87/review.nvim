@@ -311,15 +311,27 @@ local function render_description()
   push_content(lines, p, "milestone",
     (mr.milestone and mr.milestone.title) or "(none)")
 
-  -- Time tracking section is provider-dependent. GitLab returns a struct
-  -- (possibly with zero values) → visible. GitHub has no time tracking API
-  -- and returns nil → section skipped entirely.
+  -- Time tracking is provider-dependent. GitLab returns a struct (possibly
+  -- with zero values) → visible. GitHub has no time tracking API and returns
+  -- nil → both sections skipped entirely.
+  --
+  -- Estimate and spent time are separate sections so that `e` can dispatch to
+  -- two different editors: a plain duration prompt for the estimate, an
+  -- add/set/reset menu for spent time.
   if mr.time_stats then
-    push_section(lines, p, "time_tracking", "Time tracking")
     local ts = mr.time_stats
-    local est = ts.human_time_estimate or (ts.time_estimate and ts.time_estimate > 0 and format_seconds(ts.time_estimate)) or "(none)"
-    local spent = ts.human_total_time_spent or (ts.total_time_spent and ts.total_time_spent > 0 and format_seconds(ts.total_time_spent)) or "0"
-    push_content(lines, p, "time_tracking", string.format("Estimate: %s\nSpent: %s", est, spent))
+
+    push_section(lines, p, "time_estimate", "Estimate")
+    push_content(lines, p, "time_estimate",
+      ts.human_time_estimate
+      or (ts.time_estimate and ts.time_estimate > 0 and format_seconds(ts.time_estimate))
+      or "(none)")
+
+    push_section(lines, p, "time_spent", "Spent time")
+    push_content(lines, p, "time_spent",
+      ts.human_total_time_spent
+      or (ts.total_time_spent and ts.total_time_spent > 0 and format_seconds(ts.total_time_spent))
+      or "(none)")
   end
 
   push_section(lines, p, "participants", "Participants")

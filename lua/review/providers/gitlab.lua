@@ -47,6 +47,29 @@ local function mr_url(remote, iid, suffix)
   )
 end
 
+---Extracts a human-readable detail from a GitLab error response body.
+---GitLab returns `{ "message": "..." }` for many 4xx, sometimes
+---`{ "error": "..." }`, and for validation errors the message itself can be
+---a nested table (`{ "position": ["is invalid"] }`). This flattens to a
+---usable string for the notify path.
+local function gl_error_detail(res)
+  if not res.body or res.body == "" then return nil end
+  local parsed = client.decode_json(res.body)
+  if not parsed then return nil end
+  local msg = parsed.message or parsed.error
+  if type(msg) == "string" then return msg end
+  if type(msg) == "table" then
+    -- Either { field = { "is invalid", ... } } or array of strings.
+    if msg[1] then return tostring(msg[1]) end
+    local key, val = next(msg)
+    if key and val then
+      local detail = type(val) == "table" and (val[1] or vim.inspect(val)) or tostring(val)
+      return tostring(key) .. ": " .. detail
+    end
+  end
+  return nil
+end
+
 local function normalize_user(raw)
   if not raw or raw == vim.NIL then return nil end
   return {
@@ -581,6 +604,42 @@ function M.set_time_estimate(remote, iid, duration, cb)
   end)
 end
 
+---Adds to the total spent time. GitLab accepts negative durations, so "-30m"
+---subtracts. There is no "set" endpoint — callers implement that as
+---reset_spent_time followed by add_spent_time.
+---@param remote table
+---@param iid string|number
+---@param duration string  non-empty, e.g. "1h30m", "1d 2h", "-30m"
+---@param cb fun(ok: boolean, err: string|nil)
+function M.add_spent_time(remote, iid, duration, cb)
+  client.request({
+    url = mr_url(remote, iid, "/add_spent_time"),
+    method = "post",
+    headers = remote.headers,
+    query = { duration = duration },
+  }, function(res)
+    if res.ok then return cb(true) end
+    -- Malformed durations come back as a 400 with the reason in the body;
+    -- surface that instead of a bare "bad request".
+    cb(false, gl_error_detail(res) or res.err or "failed to add spent time")
+  end)
+end
+
+---Resets the total spent time back to zero.
+---@param remote table
+---@param iid string|number
+---@param cb fun(ok: boolean, err: string|nil)
+function M.reset_spent_time(remote, iid, cb)
+  client.request({
+    url = mr_url(remote, iid, "/reset_spent_time"),
+    method = "post",
+    headers = remote.headers,
+  }, function(res)
+    if res.ok then return cb(true) end
+    cb(false, gl_error_detail(res) or res.err or "failed to reset spent time")
+  end)
+end
+
 function M.fetch_participants(remote, iid, cb)
   client.request({
     url = mr_url(remote, iid, "/participants"),
@@ -677,29 +736,6 @@ end
 ---@param body string  raw markdown body for the new note
 ---@param position table|nil  GitLab position dict (nil = global thread)
 ---@param cb fun(ok: boolean, err: string|nil, discussion: table|nil)
----Extracts a human-readable detail from a GitLab error response body.
----GitLab returns `{ "message": "..." }` for many 4xx, sometimes
----`{ "error": "..." }`, and for validation errors the message itself can be
----a nested table (`{ "position": ["is invalid"] }`). This flattens to a
----usable string for the notify path.
-local function gl_error_detail(res)
-  if not res.body or res.body == "" then return nil end
-  local parsed = client.decode_json(res.body)
-  if not parsed then return nil end
-  local msg = parsed.message or parsed.error
-  if type(msg) == "string" then return msg end
-  if type(msg) == "table" then
-    -- Either { field = { "is invalid", ... } } or array of strings.
-    if msg[1] then return tostring(msg[1]) end
-    local key, val = next(msg)
-    if key and val then
-      local detail = type(val) == "table" and (val[1] or vim.inspect(val)) or tostring(val)
-      return tostring(key) .. ": " .. detail
-    end
-  end
-  return nil
-end
-
 function M.post_discussion(remote, iid, body, position, cb)
   local payload = { body = body }
   if position then payload.position = position end

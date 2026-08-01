@@ -21,6 +21,8 @@ CONTENTS                                                     *review-contents*
        :ReviewWeb ....................................... |:ReviewWeb|
        :ReviewRequest / :ReviewMine ..................... |:ReviewRequest|
        :ReviewClose ..................................... |:ReviewClose|
+       :ReviewTime ...................................... |:ReviewTime|
+       Spent-time refs trailer .......................... |review-refs-line|
        :ReviewInfo / :ReviewCommits / :ReviewNotes ...... |:ReviewInfo|
   8. Bottom panel ........................................ |review-panel|
   9. Diffview key-map .................................... |review-diff-keys|
@@ -304,6 +306,92 @@ All action commands accept `[branch|!iid]` as an argument unless noted.
   session is also torn down.
 
 ------------------------------------------------------------------------------
+                                                                 *:ReviewTime*
+:ReviewTime [{branch}|!{iid}] [{duration}]      ~
+
+  Edit the MR's SPENT time. GitLab only -- GitHub has no time tracking API
+  and the command reports that.
+
+  Without a {duration} it opens a single input field, PREFILLED with the
+  MR's current total so you can see what is logged before overwriting it.
+
+  The leading SIGN picks the operation -- there is no menu:
+
+    1h30m     SET the total to 1h30m (no sign = absolute value)
+    +30m      ADD 30m to the total
+    -30m      SUBTRACT 30m from the total
+    0         CLEAR the spent time
+
+  Durations use GitLab's syntax: `s`, `m`, `h`, `d`, `w`, `mo`, combinable
+  as `1h30m` or `1mo 2w 3d`. Note that GitLab counts a WORKDAY -- `1d` is
+  8h and `1w` is 5d.
+
+  The same rules apply to an inline {duration}, which skips the prompt: >
+    :ReviewTime               " prompt, prefilled with the current total
+    :ReviewTime 1h            " set spent time to 1h
+    :ReviewTime +1h           " add 1h
+    :ReviewTime -1h           " subtract 1h
+    :ReviewTime 0             " clear spent time
+    :ReviewTime !319          " prompt for MR !319
+    :ReviewTime !319 +1h      " add 1h to !319
+<
+  Subtracting at least as much as is logged CLEARS the value rather than
+  going negative -- GitLab rejects an over-subtraction outright, and zero
+  is what was meant. The check is local, using the workday units above.
+
+  Target resolution matches the other action commands: no argument uses
+  the active session (and refreshes its panel), an explicit target is
+  resolved on the fly and leaves any running session untouched.
+
+  GitLab exposes only `add_spent_time` (negative durations subtract) and
+  `reset_spent_time`, so SET is a reset followed by an add. A failed reset
+  aborts before the add, never leaving an add stacked on the old total.
+
+  The same field is reachable from the bottom panel with `e` on the
+  |review-panel| "Spent time" section.
+
+  With `spent_time_refs_line.enabled` set, every successful change also
+  rewrites a trailer at the bottom of the MR description -- see
+  |review-refs-line|.
+
+------------------------------------------------------------------------------
+                                                             *review-refs-line*
+Spent-time refs trailer                         ~
+
+  OFF by default. `refs {BRANCH} #time {total}` is smart-commit syntax an
+  external issue tracker picks up; GitLab does not maintain it, so the plugin
+  does. Enable it with: >
+    require("review").setup({
+      spent_time_refs_line = { enabled = true },
+    })
+<
+  After every successful |:ReviewTime| (and every `e` on the panel's "Spent
+  time" section) the MR description is rewritten so its LAST line reads: >
+    refs CVNT-3456-FEAT #time 1h 30m
+<
+  * The name is the MR's SOURCE BRANCH, uppercased verbatim -- no prefix or
+    suffix stripping, so `cvnt-3456-feat` becomes `CVNT-3456-FEAT` and
+    `feature/cvnt-1` becomes `FEATURE/CVNT-1`.
+  * The time is the CURRENT TOTAL after the change, in GitLab's own human
+    format (`1h 30m`, `3d 1h`), not the delta you typed.
+  * A total of ZERO -- cleared, or subtracted away -- REMOVES the line
+    together with its blank separator.
+  * An existing trailer is edited in place rather than duplicated. Every
+    matching line is collected first, so stale ones naming an old branch, or
+    hand-pasted copies, collapse into the single trailer at the bottom.
+  * Nothing is sent when the description already has the right shape, so a
+    no-op |:ReviewTime| does not add a "changed the description" entry to the
+    MR's activity. CRLF line endings are preserved.
+
+  The rewrite runs for explicit targets too (`:ReviewTime !319 +1h` updates
+  !319's own description). Because the time is already saved by the time the
+  description is touched, a failure here is reported as a WARNING -- the
+  spent-time change itself still stands.
+
+  Requires a provider with both `fetch_mr_details` and `update_mr`, which in
+  practice means GitLab -- the same providers that support time tracking.
+
+------------------------------------------------------------------------------
                                                                  *:ReviewInfo*
                                                               *:ReviewCommits*
                                                                 *:ReviewNotes*
@@ -358,9 +446,13 @@ INFO ~
     Reviewers       multi-select picker.
     Labels          multi-select picker.
     Milestone       single-select picker.
-    Time tracking   text input -- set time estimate (e.g. `3h30m`); empty
-                    resets. *Hidden when the provider has no time tracking
-                    (GitHub).*
+    Estimate        text input -- set the time estimate (e.g. `3h30m`);
+                    empty resets.
+    Spent time      text input, prefilled with the current total. The sign
+                    picks the operation: `1h30m` sets, `+30m` adds, `-30m`
+                    subtracts, `0` clears. Same field as |:ReviewTime|.
+                    *Estimate and Spent time are hidden when the provider*
+                    *has no time tracking (GitHub).*
     Participants    read-only.
 
   This is the default mode for new sessions.
@@ -547,6 +639,12 @@ Defaults: >lua
       enabled          = true,
       poll_interval_ms = 30 * 1000,
       timeout_ms       = 60 * 60 * 1000,
+    },
+
+    -- Mirror the MR's total spent time into a "refs <BRANCH> #time <total>"
+    -- trailer at the bottom of the description. See |review-refs-line|.
+    spent_time_refs_line = {
+      enabled = false,
     },
 
     debug = false,

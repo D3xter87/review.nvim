@@ -21,8 +21,17 @@ with feature parity.
   Resolve threads (`r` / `R`), reply (`a`), edit / delete, cursor-tracked
   auto-scroll as you move through the diff.
 - `:ReviewInfo` shows title, description, assignees, reviewers, labels,
-  milestone, time tracking (GitLab only), participants, draft toggle.
-  Each section is editable (`e`) — text input or checkbox picker.
+  milestone, estimate + spent time (GitLab only), participants, draft
+  toggle. Each section is editable (`e`) — text input or checkbox picker.
+- Spent time is one input field prefilled with the current total, where the
+  **sign picks the operation**: `1h30m` sets it, `+30m` adds, `-30m`
+  subtracts, `0` clears. Reachable with `e` on the **Spent time** section
+  or directly via `:ReviewTime [branch|!iid] [duration]` —
+  `:ReviewTime +1h` logs an hour without opening the panel.
+- Opt-in `spent_time_refs_line` keeps a smart-commit trailer at the bottom
+  of the MR description in sync with the total: `refs CVNT-3456-FEAT #time
+  1h 30m` (source branch uppercased). Edited in place, never duplicated,
+  and removed when the total hits zero.
 - `:ReviewMerge` opens a merge dialog with **Delete source branch /
   Squash / Edit commit message** checkboxes and **Merge now / Set
   auto-merge** actions.
@@ -71,7 +80,7 @@ tab.
     "Review", "ReviewOpen",
     "ReviewApprove", "ReviewRevoke",
     "ReviewInfo", "ReviewCommits", "ReviewNotes",
-    "ReviewMerge", "ReviewClose",
+    "ReviewMerge", "ReviewClose", "ReviewTime",
   },
   opts = {},
 }
@@ -144,6 +153,12 @@ require("review").setup({
     poll_interval_ms = 30 * 1000,         -- 30 seconds
     timeout_ms       = 60 * 60 * 1000,    -- 1 hour
   },
+
+  -- Mirror the total spent time into a "refs <BRANCH> #time <total>"
+  -- trailer at the bottom of the MR description. Off by default.
+  spent_time_refs_line = {
+    enabled = false,
+  },
 })
 ```
 
@@ -177,6 +192,7 @@ shortcuts for "open this MR with that panel up front":
 | `:ReviewRequest` | List open MRs/PRs where you're a requested reviewer, then open one. |
 | `:ReviewMine`    | List your own open MRs/PRs (assignee or author), then open one. |
 | `:ReviewClose`   | Close MR with an optional farewell comment.              |
+| `:ReviewTime`    | Spent time. Sign picks the op: `1h` sets, `+1h` adds, `-1h` subtracts, `0` clears. No arg → prompt prefilled with the current total. GitLab only. |
 | `:ReviewInfo`    | Bottom panel — MR metadata, editable sections.           |
 | `:ReviewCommits` | Bottom panel — commits, `<CR>` opens commit diff.        |
 | `:ReviewNotes`   | Bottom panel — every thread / note / suggestion.         |

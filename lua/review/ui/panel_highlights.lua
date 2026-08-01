@@ -196,6 +196,8 @@ function M.apply_info(buf, lines, line_targets)
       elseif target.section == "labels" or target.section == "milestone" or target.section == "assignees" or target.section == "reviewers" then
         hl_pattern(buf, row, line, "%(none%)", "ReviewMuted")
         hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
+      elseif target.section == "time_estimate" or target.section == "time_spent" then
+        hl_pattern(buf, row, line, "%(none%)", "ReviewMuted")
       elseif target.section == "description" then
         hl_pattern(buf, row, line, "%(empty%)", "ReviewMuted")
       elseif target.section == "participants" then

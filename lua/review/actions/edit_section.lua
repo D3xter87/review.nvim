@@ -80,7 +80,7 @@ local function edit_description()
   })
 end
 
-local function edit_time_tracking()
+local function edit_time_estimate()
   local ctx = controller.get_ctx()
   if not ctx then return end
   local ts = ctx.mr.time_stats or {}
@@ -98,6 +98,14 @@ local function edit_time_tracking()
       end)
     end,
   })
+end
+
+-- Spent time reads a signed duration (set / +add / -subtract) rather than a
+-- plain value, so it lives in its own action module — shared verbatim with
+-- `:ReviewTime`. Passing an empty target makes it resolve to the active
+-- session and refresh the panel.
+local function edit_time_spent()
+  require("review.actions.spent_time").run({})
 end
 
 -- ---------------------------------------------------------- pickers
@@ -280,7 +288,8 @@ local DISPATCH = {
   reviewers = edit_reviewers,
   labels = edit_labels,
   milestone = edit_milestone,
-  time_tracking = edit_time_tracking,
+  time_estimate = edit_time_estimate,
+  time_spent = edit_time_spent,
   -- participants is read-only by design.
 }
 
