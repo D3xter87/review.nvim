@@ -233,16 +233,6 @@ local function auto_merge_enabled(mr)
   return mr.merge_when_pipeline_succeeds == true
 end
 
--- Auto-merge state as a section body line.
-local function format_auto_merge(mr)
-  if not auto_merge_enabled(mr) then return "[ ] no" end
-  local am = mr.auto_merge
-  local line = "[x] yes"
-  if am and am.strategy then line = line .. " — " .. am.strategy end
-  if am and am.set_by then line = line .. ", set by @" .. am.set_by end
-  return line
-end
-
 local function user_display(u)
   if not u then return "?" end
   if u.name and u.name ~= u.username then
@@ -305,10 +295,6 @@ local function render_description()
 
   push_section(lines, p, "draft", "Draft")
   push_content(lines, p, "draft", mr.is_draft and "[x] yes" or "[ ] no")
-
-  -- Read-only: arming / cancelling auto-merge goes through :ReviewMerge.
-  push_section(lines, p, "auto_merge", "Auto-merge")
-  push_content(lines, p, "auto_merge", format_auto_merge(mr))
 
   push_section(lines, p, "title", "Title")
   push_content(lines, p, "title", mr.title or "")

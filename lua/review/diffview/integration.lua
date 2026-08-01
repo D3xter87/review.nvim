@@ -142,6 +142,44 @@ function M.is_diffview_buf(bufnr)
   return false
 end
 
+---Maps a loaded diff buffer back to the file entry + side it renders.
+---
+---Diffview creates a file's buffers lazily (only once you open that file), so
+---sign placement can't rely on scanning buffer names alone — it needs to know
+---which SIDE a buffer is, and the name of a `diffview://` buffer only encodes
+---the rev sha. We ask diffview itself: every FileEntry keeps a layout whose
+---`a`/`b` windows hold the old/new `vcs.File`, each with its bufnr once loaded.
+---@param bufnr integer
+---@return { path: string, oldpath: string|nil, side: "old"|"new" }|nil
+function M.buf_diff_target(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return nil end
+  local ok, lib = pcall(require, "diffview.lib")
+  if not ok then return nil end
+
+  for _, view in ipairs(lib.views or {}) do
+    local entries = {}
+    pcall(function()
+      for _, entry in view.files:iter() do entries[#entries + 1] = entry end
+    end)
+    if #entries == 0 then
+      pcall(function() entries = view.panel:ordered_file_list() or {} end)
+    end
+
+    for _, entry in ipairs(entries) do
+      local layout = entry.layout
+      local a = layout and layout.a and layout.a.file
+      local b = layout and layout.b and layout.b.file
+      if a and a.bufnr == bufnr then
+        return { path = entry.path, oldpath = entry.oldpath, side = "old" }
+      end
+      if b and b.bufnr == bufnr then
+        return { path = entry.path, oldpath = entry.oldpath, side = "new" }
+      end
+    end
+  end
+  return nil
+end
+
 ---For the current window in diffview, returns { path, side }.
 ---side ∈ { "old", "new" } based on diffview's own view layout.
 ---Returns nil if we can't determine it.

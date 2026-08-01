@@ -198,10 +198,6 @@ function M.apply_info(buf, lines, line_targets)
       -- Within section bodies, apply contextual highlights.
       if target.section == "draft" then
         hl_pattern(buf, row, line, "%[[ x]%]%s*%w+", "ReviewDraft")
-      elseif target.section == "auto_merge" then
-        hl_pattern(buf, row, line, "%[[ x]%]%s*%w+",
-          line:find("%[x%]") and "ReviewAutoMerge" or "ReviewMuted")
-        hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
       elseif target.section == "labels" or target.section == "milestone" or target.section == "assignees" or target.section == "reviewers" then
         hl_pattern(buf, row, line, "%(none%)", "ReviewMuted")
         hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
