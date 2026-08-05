@@ -32,6 +32,8 @@ local diffview_int = require("review.diffview.integration")
 local readonly = require("review.diffview.readonly")
 local bottom_panel = require("review.ui.bottom_panel")
 local highlights = require("review.ui.highlights")
+local note_preview = require("review.ui.note_preview")
+local buffer_keys = require("review.ui.buffer_keys")
 local notify_util = require("review.util.notify")
 
 -- Augroups are shared across sessions — callbacks branch on the active
@@ -73,8 +75,16 @@ function M.get_active_ctx()
   return ctx_by_tab[tabnr]
 end
 
--- Back-compat alias used by older action modules.
-function M.get_ctx() return M.get_active_ctx() end
+---The ctx of a specific session, or the active one when `tabnr` is nil.
+---Actions triggered from OUTSIDE a session's tab (the note-preview float in an
+---editing tab) must pass the tab they resolved, since there is no active ctx
+---there.
+---@param tabnr integer|nil
+---@return ReviewCtx|nil
+function M.get_ctx(tabnr)
+  if tabnr then return ctx_by_tab[tabnr] end
+  return M.get_active_ctx()
+end
 
 function M.has_session()
   return M.get_active_ctx() ~= nil
@@ -129,28 +139,6 @@ local function setup_visual_keymaps()
   end
 end
 
----Look up a discussion in the ACTIVE session that anchors to (path, line, side).
----@param path string
----@param line integer
----@param side "old"|"new"
----@return any|nil
-local function find_discussion_for(path, line, side)
-  local active = state_mod.get_active()
-  if not active then return nil end
-  for _, d in ipairs(active.discussions or {}) do
-    local first = d.notes and d.notes[1]
-    local pos = first and first.position
-    if type(pos) == "table" and pos ~= vim.NIL then
-      local p_path = pos.new_path or pos.old_path
-      local p_line = tonumber(side == "new" and pos.new_line or pos.old_line)
-      if p_path and p_line and p_path == path and p_line == line then
-        return d.id
-      end
-    end
-  end
-  return nil
-end
-
 local function setup_lifecycle_autocmds()
   if vim.fn.exists("#" .. LIFECYCLE_AUGROUP) == 1 then return end
 
@@ -175,23 +163,25 @@ local function setup_lifecycle_autocmds()
   -- session expands EXCLUSIVELY the thread anchored to the cursor's line.
   -- Without a match, all folds collapse — keeping the panel as a passive
   -- "what's commented at my cursor" indicator.
+  --
+  -- The lookup is highlights.discussions_at, the same index that places the
+  -- gutter icons and drives |review-note-preview| — so panel, gutter and float
+  -- can never disagree about whether a line carries a note. Its `has_target`
+  -- return replaces the old is_diffview_buf gate: it excludes the panel and
+  -- diffview's own file panel (where collapsing would fight the user's manual
+  -- zo/zR) while ADMITTING plain working-tree files of the session, which the
+  -- old gate rejected.
   vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
     group = group,
     callback = function(args)
-      local active = M.get_active_ctx()
-      if not active then return end
+      if not M.get_active_ctx() then return end
       local session = state_mod.get_active()
       if not session or session.panel.mode ~= "notes" then return end
-      if not diffview_int.is_diffview_buf(args.buf) then return end
-      local target = diffview_int.current_diff_target()
-      if not target then
-        bottom_panel.collapse_all()
-        return
-      end
       local line = vim.api.nvim_win_get_cursor(0)[1]
-      local discussion_id = find_discussion_for(target.path, line, target.side)
-      if discussion_id then
-        bottom_panel.scroll_to_discussion(discussion_id)
+      local hits, has_target = highlights.discussions_at(args.buf, line)
+      if not has_target then return end
+      if #hits > 0 then
+        bottom_panel.scroll_to_discussion(hits[1].discussion.id)
       else
         bottom_panel.collapse_all()
       end
@@ -211,9 +201,12 @@ local function clear_lifecycle_autocmds_if_empty()
   end
 end
 
----Re-fetch discussions for the ACTIVE session and refresh its panel + signs.
-function M.refresh_discussions()
-  local ctx = M.get_active_ctx()
+---Re-fetch discussions for a session and refresh its panel + signs. Defaults to
+---the active session; pass `tabnr` when triggering this from another tab (see
+---M.get_ctx).
+---@param tabnr integer|nil
+function M.refresh_discussions(tabnr)
+  local ctx = M.get_ctx(tabnr)
   if not ctx then return end
   local session = state_mod.get_for_tab(ctx.tabnr)
   ctx.provider.fetch_mr_discussions(ctx.remote, ctx.mr.iid, function(discussions, err)
@@ -222,8 +215,19 @@ function M.refresh_discussions()
       return
     end
     if session then session.discussions = discussions end
-    if bottom_panel.is_open() then bottom_panel.refresh() end
-    highlights.refresh(discussions)
+    -- bottom_panel reads the ACTIVE session's panel state, so touching it from
+    -- another tab would either act on the wrong panel or index a nil session.
+    if vim.api.nvim_get_current_tabpage() == ctx.tabnr
+        and bottom_panel.is_open() then
+      bottom_panel.refresh()
+    end
+    -- Anchors FIRST: the float re-reads its threads through them, so
+    -- re-rendering before this would just redraw the stale snapshot.
+    highlights.refresh(discussions, ctx.tabnr)
+    -- The float holds a snapshot of a thread; re-render it against the new
+    -- discussions so a resolve toggle done from inside it is visible right
+    -- away (and it closes if its thread is gone).
+    pcall(note_preview.refresh)
   end)
 end
 
@@ -372,6 +376,7 @@ local function start_session(provider, remote, branch, full, initial_mode)
 
     readonly.apply()
     setup_visual_keymaps()
+    buffer_keys.attach()
     setup_lifecycle_autocmds()
     wire_panel_hooks()
     bottom_panel.open(initial_mode)
@@ -681,6 +686,9 @@ function M.close(tabnr)
   -- notification later.
   local closed_iid = ctx.mr and ctx.mr.iid or "?"
 
+  -- Close the preview FIRST: it is a float in this tab, and both the panel
+  -- teardown and :DiffviewClose below rearrange the tab's windows.
+  pcall(note_preview.close)
   pcall(bottom_panel.close)
   pcall(highlights.clear)
   pcall(diffview_int.close)
@@ -692,6 +700,7 @@ function M.close(tabnr)
   -- Tear down shared autocmds + readonly only when no sessions remain.
   if next(ctx_by_tab) == nil then
     pcall(readonly.clear)
+    pcall(buffer_keys.detach)
     clear_visual_keymaps_if_empty()
     clear_lifecycle_autocmds_if_empty()
   end

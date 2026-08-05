@@ -26,14 +26,16 @@ CONTENTS                                                     *review-contents*
        :ReviewInfo / :ReviewCommits / :ReviewNotes ...... |:ReviewInfo|
   8. Bottom panel ........................................ |review-panel|
   9. Diffview key-map .................................... |review-diff-keys|
- 10. Notes panel key-map ................................. |review-notes-keys|
- 11. Highlights .......................................... |review-highlights|
- 12. Icons ............................................... |review-icons|
- 13. Auto-merge watcher .................................. |review-auto-merge|
- 14. Configuration ...................................... |review-config|
- 15. Provider detection ................................. |review-providers|
- 16. Lua API ............................................ |review-api|
- 17. Troubleshooting .................................... |review-trouble|
+ 10. Notes in the code ................................... |review-note-preview|
+       Unresolved-thread navigation ..................... |review-notes-nav|
+ 11. Notes panel key-map ................................. |review-notes-keys|
+ 12. Highlights .......................................... |review-highlights|
+ 13. Icons ............................................... |review-icons|
+ 14. Auto-merge watcher .................................. |review-auto-merge|
+ 15. Configuration ...................................... |review-config|
+ 16. Provider detection ................................. |review-providers|
+ 17. Lua API ............................................ |review-api|
+ 18. Troubleshooting .................................... |review-trouble|
 
 ==============================================================================
 1. Introduction                                                 *review-intro*
@@ -496,10 +498,120 @@ In *visual mode* you get two extra mappings:
 
 The plugin auto-scrolls the |:ReviewNotes| panel as the cursor moves
 through the diff: when a comment is anchored to the cursor's line, the
-panel jumps to that thread.
+panel jumps to that thread. See |review-note-preview| for reading that
+thread in place, without the panel.
 
 ==============================================================================
-10. Notes panel key-map                                    *review-notes-keys*
+10. Notes in the code                                    *review-note-preview*
+
+A float showing the whole discussion thread anchored to the cursor's line,
+so you can read — and answer — a comment where the code is instead of
+switching the bottom panel to `notes` mode.
+
+Availability follows the gutter exactly: the key works wherever one of the
+|review-icons| is visible. That means both
+
+  * diffview content buffers, either side, and
+  * plain working-tree files -- in ANY tab, not just the session's own.
+    Start `:Review` for the branch you have checked out, go back to the tab
+    you were working in, and the notes are on the code you are editing,
+    with the review sitting in a background tab.
+
+Which review applies to an ordinary tab is decided by the checked-out
+branch: the session whose source branch is HEAD. So a second, unrelated
+review open at the same time won't decorate this branch's files with its
+own line numbers. Inside a session's own tab that session always wins, so
+two concurrent reviews of the same file stay independent.
+
+Notes without an anchor (global / issue comments, review summaries) have no
+gutter icon and therefore no float; read them in |:ReviewNotes|.
+
+Keys ~
+
+The mapping is buffer-local and exists only while a session is live, so it
+never shadows your own key outside a review. Configure it with
+`note_preview.key` (|review-config|); `false` disables it entirely.
+
+  <leader>rp     (1st press) open the float, WITHOUT moving the cursor
+                 (2nd press) move the cursor into the float
+                 (3rd press, from inside) close
+  q / <Esc>      close (inside the float)
+
+The float also closes when the cursor moves in the origin window, when you
+leave it, and when the view scrolls out from under it. Entering it does
+NOT close it -- that is the whole point of the second press. Once focused
+it is an ordinary window, so `j`, `<C-d>` and friends scroll a thread that
+is taller than `max_height`; the border footer says so when there is more
+below the fold.
+
+Acting on a thread ~
+
+These work only from INSIDE the float (so step in with a second press
+first), and act on the thread the cursor is on -- which matters when
+several threads share one line. Configure via `note_preview.resolve_key` /
+`note_preview.reply_key`; `false` disables either. They are named after
+their |review-notes-keys| equivalents.
+
+  r              toggle resolve on the thread under the cursor
+  a              reply to it (opens the same markdown prompt as the panel)
+
+After a resolve the float re-renders in place, so the icon flips ❌ -> ✅
+in front of you and the gutter updates. `a` dismisses the float first --
+the reply prompt is itself a float, and one modal thing at a time reads
+better.
+
+Both work even when the review lives in a background tab and the current
+tab hosts no session; the float remembers which session its threads came
+from. Edit and delete remain panel-only (|review-notes-keys|).
+
+Jumping between unresolved threads ~     *review-notes-nav*
+
+  ]r             next unresolved (❌) thread
+  [r             previous one
+
+Stops only on ❌ threads -- resolved (✅) ones are done, and 💬
+non-resolvable notes (issue comments, review summaries) have no resolve
+lifecycle, so neither is something to work through. Configure with
+`notes_nav.next` / `notes_nav.prev`; `false` disables.
+
+Order is by (file, line). It walks the current file first and then runs on
+into the next file of the MR that still has unresolved threads, opening it
+-- in an ordinary tab by editing the working-tree file, in the diffview tab
+by switching diffview's own file. It wraps around at the end, so repeated
+`]r` walks the entire review. With `notify = "verbose"` each jump reports
+`unresolved 3/7 -- path:line`.
+
+Threads are located by their NEW-side line, which is what both a
+checked-out file and the right-hand diff pane show. A thread anchored only
+to a removed line has no counterpart in the current code and is skipped.
+
+Contents ~
+
+Per thread: a header (`<icon> <path>:<line>  @author  · <when>`), the
+anchor note's body, then every non-system reply prefixed `↳ @author:`.
+When more than one thread is anchored to the same line, all of them are
+rendered in one float, separated by a rule, with the count in the title.
+
+Suggested changes ~
+
+A ```suggestion block is rendered as a diff rather than as a raw fence:
+
+  Suggested change:
+  - if x then return y end          (ReviewSuggestionDel)
+  + if not x then return end        (ReviewSuggestionAdd)
+  + return y
+
+The replaced lines are read from the object store at the MR's head commit
+(`git show <head_sha>:<path>`), NOT from the buffer you are standing in --
+a working-tree buffer may hold uncommitted edits, which would render a
+diff that looks right and isn't. When those lines can't be recovered (the
+path doesn't exist at that rev, or the note carries no new-side line) the
+block degrades to the proposed lines alone under an explicit
+`(original lines unavailable)` label, so a `+`-only block is never
+mistaken for a genuine pure addition.
+
+==============================================================================
+11. Notes panel key-map                                    *review-notes-keys*
 
 Inside `:ReviewNotes`:
 
@@ -517,6 +629,10 @@ Inside `:ReviewNotes`:
                  winbar shows the active mode as `sort: <name>`.
   q              end the review session
 
+|review-note-preview| is the in-code counterpart of `<CR>`: instead of
+jumping from the panel to the code, it brings the thread to the code, with
+`r` / `a` available there too. `e` (edit) and `d` (delete) stay panel-only.
+
 Folding ~
 
 The Notes panel uses native vim folds (`foldmethod=expr`). Each thread is
@@ -532,14 +648,16 @@ in the diffview content windows, the notes panel auto-syncs:
   * Cursor lands on a line without a comment    -> all folds collapse.
 
 Manual `zo` / `zR` from inside the panel still works. The next CursorMoved
-event in diffview will re-sync.
+event will re-sync. The sync fires in the diff windows AND in plain
+working-tree files of the session -- anywhere a gutter icon can appear.
 
 ==============================================================================
-11. Highlights                                              *review-highlights*
+12. Highlights                                              *review-highlights*
 
-The bottom panel is colored via dedicated highlight groups, each linked
-to a sensible default with `default = true` -- override in your colorscheme
-or set them yourself with `vim.api.nvim_set_hl(0, <group>, {...})`.
+The bottom panel and the |review-note-preview| float are colored via
+dedicated highlight groups, each linked to a sensible default with
+`default = true` -- override in your colorscheme or set them yourself with
+`vim.api.nvim_set_hl(0, <group>, {...})`.
 
   ReviewIid             `Number`           !iid markers
   ReviewAuthor          `Identifier`       @username tokens
@@ -560,8 +678,19 @@ or set them yourself with `vim.api.nvim_set_hl(0, <group>, {...})`.
   ReviewLine            `Number`           line numbers in note headers
   ReviewMuted           `Comment`          "(global)", "(none)", "(empty)"
 
+Note-preview float only (|review-note-preview|):
+
+  ReviewPreviewNormal   `NormalFloat`      float background
+  ReviewPreviewBorder   `FloatBorder`      float border / title / footer
+  ReviewSuggestionDel   `DiffDelete`       "-" rows: the replaced code
+  ReviewSuggestionAdd   `DiffAdd`          "+" rows: the proposed code
+  ReviewSuggestionLabel `Comment`          "Suggested change:" + degradations
+  ReviewReplyMarker     `Special`          the reply arrow
+  ReviewSeparator       `Comment`          rule between stacked threads
+  ReviewDate            `Comment`          "2d ago" in a thread header
+
 ==============================================================================
-12. Icons                                                       *review-icons*
+13. Icons                                                       *review-icons*
 
 Bottom panel and diff gutter use three icons (rendered as Unicode emoji
 at runtime: speech-bubble, cross-mark, check-mark):
@@ -572,10 +701,10 @@ at runtime: speech-bubble, cross-mark, check-mark):
   check-mark      resolvable thread, fully resolved.
 
 The Notes winbar shows `<unresolved>/<total>` plus the matching status
-icon.
+icon. A gutter icon also marks where |review-note-preview| is available.
 
 ==============================================================================
-13. Auto-merge watcher                                     *review-auto-merge*
+14. Auto-merge watcher                                     *review-auto-merge*
 
 When you pick "Set auto-merge" in the |:ReviewMerge| dialog, the MR is
 left in the forge's "merge after pipeline" queue. The plugin's
@@ -603,7 +732,7 @@ Tunable via |review-config|:
     auto_merge_watcher.timeout_ms        -- default 3 600 000 (1 h)
 
 ==============================================================================
-14. Configuration                                              *review-config*
+15. Configuration                                              *review-config*
 
 Defaults: >lua
 
@@ -633,6 +762,23 @@ Defaults: >lua
     -- Bottom panel height (lines).
     panel = { height = 12 },
 
+    -- Float with the thread anchored to the cursor's line.
+    -- See |review-note-preview|. Any key set to false maps nothing.
+    note_preview = {
+      key         = "<leader>rp",
+      border      = "rounded",
+      max_width   = 80,
+      max_height  = 20,
+      resolve_key = "r",   -- inside the float: toggle resolve
+      reply_key   = "a",   -- inside the float: reply
+    },
+
+    -- Jump between unresolved threads. See |review-notes-nav|.
+    notes_nav = {
+      next = "]r",
+      prev = "[r",
+    },
+
     -- Notification verbosity:
     --   "quiet"   (default) -- only event confirmations ("!42 merged"),
     --                          warnings, and errors. Progress chatter
@@ -659,7 +805,7 @@ Defaults: >lua
   }
 <
 ==============================================================================
-15. Provider detection                                      *review-providers*
+16. Provider detection                                      *review-providers*
 
 Same scheme as |cicd|:
 
@@ -669,7 +815,7 @@ Same scheme as |cicd|:
   4. Fallback -> `gitlab`.
 
 ==============================================================================
-16. Lua API                                                       *review-api*
+17. Lua API                                                       *review-api*
 
                                                             *review.setup()*
 require("review").setup({opts})                 ~
@@ -683,7 +829,7 @@ require("review").open({opts})                  ~
   `{ iid = N }`. Same as |:Review| with the corresponding argument.
 
 ==============================================================================
-17. Troubleshooting                                           *review-trouble*
+18. Troubleshooting                                           *review-trouble*
 
 "HTTP 422" from `:ReviewApprove` (GitHub):
     Most common cause: GitHub forbids approving your own PR. The plugin
@@ -708,6 +854,25 @@ Closing the diffview tab kills Neovim:
     Should be impossible -- the plugin opens a fallback empty tab if the
     diffview tab is the last one before tearing down. If you still hit
     this, please file an issue with reproduction steps.
+
+The note preview shows only "+" lines:
+    The replaced lines couldn't be read at the MR's head commit -- the path
+    doesn't exist there (added / renamed / deleted), or the note has no
+    new-side line (it's anchored to a removed line). The label says so
+    rather than passing off a `+`-only block as a pure addition.
+    See |review-note-preview|.
+
+The note-preview key does nothing:
+    It is bound only while a session is live, and only in buffers that can
+    carry a gutter icon. If there's no icon on the line, there's no thread
+    to show -- set `notify = "verbose"` to see the "no note on this line"
+    message. Global notes have no anchor and never appear in the float.
+
+No icons / no preview outside the diffview tab:
+    In an ordinary tab the notes are matched by the checked-out branch, so
+    HEAD must be the MR's source branch. A detached HEAD, or having since
+    switched branches, matches nothing. The branch is re-read at most once
+    a second, so a switch is picked up on the next tab or buffer change.
 
 The "session closed" notification doesn't show after :ReviewMerge:
     Your notify plugin (e.g. noice, snacks) may be coalescing closely-

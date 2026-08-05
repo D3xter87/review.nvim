@@ -32,6 +32,15 @@ local GROUPS = {
   ReviewLine            = "Number",
   ReviewSystemNote      = "Comment",
   ReviewMuted           = "Comment",
+  -- Note-preview float (|review-note-preview|).
+  ReviewPreviewNormal   = "NormalFloat",
+  ReviewPreviewBorder   = "FloatBorder",
+  ReviewSuggestionAdd   = "DiffAdd",
+  ReviewSuggestionDel   = "DiffDelete",
+  ReviewSuggestionLabel = "Comment",
+  ReviewReplyMarker     = "Special",
+  ReviewSeparator       = "Comment",
+  ReviewDate            = "Comment",
 }
 
 -- "ready"-state lexicon: which strings map to OK vs blocker styling. The
@@ -85,6 +94,19 @@ local function hl(buf, row, start_col, end_col, hl_group)
   pcall(vim.api.nvim_buf_set_extmark, buf, M.ns(), row, start_col, {
     end_col = end_col,
     hl_group = hl_group,
+  })
+end
+
+---Highlights a whole row INCLUDING the cells past end-of-line. `hl` stops at
+---the last character, which leaves a diff row's background ending mid-float.
+---@param buf integer
+---@param row integer  0-indexed
+---@param hl_group string
+local function hl_line(buf, row, hl_group)
+  pcall(vim.api.nvim_buf_set_extmark, buf, M.ns(), row, 0, {
+    end_row = row + 1,
+    hl_group = hl_group,
+    hl_eol = true,
   })
 end
 
@@ -280,6 +302,45 @@ function M.apply_notes(buf, lines, line_targets)
       hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
     elseif line == "(no notes)" then
       hl(buf, row, 0, #line, "ReviewMuted")
+    end
+  end
+end
+
+-- --------------------------------------------------- Note preview (float)
+
+---Apply highlights for the note-preview float. `kinds[i]` classifies line i:
+---"head" | "body" | "reply" | "label" | "removed" | "added" | "separator".
+---
+---Head lines have the same shape as a panel thread head, so they reuse
+---highlight_thread_head verbatim (including its byte-safe handling of the
+---multibyte icon prefix). Diff rows use hl_line so the DiffAdd / DiffDelete
+---background spans the full float width.
+---@param buf integer
+---@param lines string[]
+---@param kinds string[]
+function M.apply_note_preview(buf, lines, kinds)
+  for i, line in ipairs(lines) do
+    local row = i - 1
+    local kind = kinds[i]
+    if kind == "head" then
+      highlight_thread_head(buf, row, line)
+      -- Trailing "· <relative date>" segment.
+      local ds = line:find("·[^·]*$")
+      if ds then hl(buf, row, ds - 1, #line, "ReviewDate") end
+    elseif kind == "reply" then
+      local marker = line:find("↳", 1, true)
+      if marker then hl(buf, row, marker - 1, marker - 1 + #"↳", "ReviewReplyMarker") end
+      hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
+    elseif kind == "body" then
+      hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
+    elseif kind == "removed" then
+      hl_line(buf, row, "ReviewSuggestionDel")
+    elseif kind == "added" then
+      hl_line(buf, row, "ReviewSuggestionAdd")
+    elseif kind == "label" then
+      hl(buf, row, 0, #line, "ReviewSuggestionLabel")
+    elseif kind == "separator" then
+      hl(buf, row, 0, #line, "ReviewSeparator")
     end
   end
 end

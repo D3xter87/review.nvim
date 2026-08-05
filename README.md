@@ -20,6 +20,16 @@ with feature parity.
   (GitHub merges issue + review comments + reviews into one stream).
   Resolve threads (`r` / `R`), reply (`a`), edit / delete, cursor-tracked
   auto-scroll as you move through the diff.
+- `<leader>rp` on any line with a gutter icon opens a **float with the whole
+  thread** — in the diff, *and* on your normal working-tree files in **any
+  tab** while the review sits in a background tab (matched by the checked-out
+  branch). Press again to move the cursor into it, then `r` toggles resolve
+  and `a` replies; `q`/`<Esc>` closes. Suggestions render as a real `-`/`+`
+  diff instead of a raw ` ```suggestion ` fence.
+- `]r` / `[r` walk the **unresolved (❌) threads** straight from the code —
+  current file first, then on into the next file that still has some,
+  wrapping at the end. Works in the diff and while browsing the branch
+  locally.
 - `:ReviewInfo` shows title, description, assignees, reviewers, labels,
   milestone, estimate + spent time (GitLab only), participants, draft
   toggle. Each section is editable (`e`) — text input or checkbox picker.
@@ -146,6 +156,22 @@ require("review").setup({
     height = 12,  -- bottom panel height in lines
   },
 
+  -- Float with the thread anchored to the cursor's line.
+  note_preview = {
+    key         = "<leader>rp",  -- false = don't map anything
+    border      = "rounded",
+    max_width   = 80,
+    max_height  = 20,
+    resolve_key = "r",  -- inside the float: toggle resolve
+    reply_key   = "a",  -- inside the float: reply
+  },
+
+  -- Jump between unresolved (❌) threads from the code.
+  notes_nav = {
+    next = "]r",
+    prev = "[r",
+  },
+
   -- Notification verbosity. "quiet" (default) only shows event
   -- confirmations ("!42 merged"), warnings and errors. "verbose" also
   -- shows progress chatter ("looking up MRs...", "merging...").
@@ -216,6 +242,24 @@ date → author.
 
 Diff visual-mode keys: `c` line comment · `s` suggestion (prefilled with
 selected code).
+
+Note preview (`<leader>rp`, configurable via `note_preview.key`): float with
+the full thread, available wherever a gutter icon is — diff buffers, and your
+working-tree files in any tab while the review runs in a background tab
+(which review applies is decided by the checked-out branch, so a second
+unrelated session can't bleed into it). First press opens it without stealing
+the cursor, second press moves into it, `q`/`<Esc>` closes; moving the cursor
+in the origin window dismisses it. Suggestions are shown as a `-`/`+` diff,
+with the replaced lines read from the MR's head commit (never from a
+possibly-dirty working-tree buffer).
+
+Inside the float: `r` toggles resolve on the thread under the cursor (it
+re-renders in place, so ❌ → ✅ happens in front of you), `a` replies. Edit
+and delete stay panel-only.
+
+Unresolved-thread navigation: `]r` / `[r` (`notes_nav.next` / `.prev`) stop
+only on ❌ threads, ordered by file then line, continuing into the next file
+that still has some and wrapping at the end.
 
 Icons in panel + gutter:
 - 💬 non-resolvable note (issue / review / global) — informational

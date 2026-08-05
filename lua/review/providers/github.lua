@@ -348,15 +348,24 @@ local function normalize_review(raw)
 end
 
 ---Convert a GitHub review-comment line/side into our generic position dict.
+---
+---`start_*_line` carries the range of a MULTI-LINE comment. GitHub anchors on
+---the END line and encodes the span separately (unlike GitLab, which puts it in
+---the ```suggestion fence), so without it a multi-line suggestion can't be
+---rendered as a diff — see review.util.suggestion. Only the *_line fields feed
+---gutter placement; these extras are ignored there.
 local function pr_comment_position(c)
   local line = nullable(c.line) or nullable(c.original_line)
   if not line then return nil end
+  local start = nullable(c.start_line) or nullable(c.original_start_line)
   local side = nullable(c.side) or "RIGHT"
   local path = nullable(c.path)
   if side == "RIGHT" then
-    return { new_path = path, old_path = path, new_line = line, old_line = nil }
+    return { new_path = path, old_path = path, new_line = line, old_line = nil,
+      start_new_line = start }
   else
-    return { new_path = path, old_path = path, new_line = nil, old_line = line }
+    return { new_path = path, old_path = path, new_line = nil, old_line = line,
+      start_old_line = start }
   end
 end
 

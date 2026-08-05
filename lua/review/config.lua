@@ -28,6 +28,32 @@ local defaults = {
     height = 12,
   },
 
+  -- Read-only float showing the discussion thread anchored to the cursor's
+  -- line — available wherever a gutter icon is (diff buffers and working-tree
+  -- files of the session). Press the key again to move the cursor INTO the
+  -- float; `q` / <Esc> closes it, as does moving the cursor in the origin
+  -- window. The mapping is buffer-local and only lives for the duration of a
+  -- review session, so it never shadows your own key outside one.
+  note_preview = {
+    key        = "<leader>rp",  -- false = don't map anything
+    border     = "rounded",
+    max_width  = 80,
+    max_height = 20,
+    -- Acted on the thread under the cursor INSIDE the float (so they only
+    -- exist once you've pressed `key` a second time to step into it). Named
+    -- after their Notes-panel equivalents on purpose. false = don't map.
+    resolve_key = "r",   -- toggle resolve on the thread under the cursor
+    reply_key   = "a",   -- reply to it
+  },
+
+  -- Jump between UNRESOLVED threads (the ❌ ones) without leaving the code.
+  -- Walks the current file first, then the next file of the MR that still has
+  -- unresolved threads, wrapping at the end. See |review-notes-nav|.
+  notes_nav = {
+    next = "]r",  -- false = don't map
+    prev = "[r",
+  },
+
   -- Notification verbosity:
   --   "quiet"   (default) — only event confirmations ("!42 merged"),
   --                         warnings, and errors. Progress chatter
