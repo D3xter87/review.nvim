@@ -438,6 +438,14 @@ INFO ~
   description. Each editable section has a marker -- press `e` while the
   cursor is inside it:
 
+    Issue           (with tracker.nvim installed, when the source branch
+                    names an issue, e.g. `cvnt-3591`) key, status and
+                    summary of that issue; `e` opens it in tracker.nvim.
+                    Kept current: a change made through tracker.nvim
+                    shows at once; one made in Jira's web UI when you
+                    come back to Neovim or to the panel (fetched again
+                    when older than 30 s).
+
     Draft           toggle (no input -- flips draft state).
                     GitLab encodes draft as a `Draft:` prefix in the title;
                     we strip the prefix in display and re-add it on title

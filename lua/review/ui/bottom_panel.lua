@@ -267,6 +267,77 @@ local function push_content(lines, p, section_id, text)
   end
 end
 
+-- The tracker issue of the MR's source branch, when tracker.nvim is
+-- installed (soft dependency: nothing breaks without it).
+-- key → { status, summary, at (os.time of the fetch), fetching }.
+local tracker_issues = {}
+local TRACKER_FRESH = 30 -- seconds an issue's status counts as current
+
+local function info_visible()
+  local p = panel_state()
+  return p and p.mode == "info" and p.buf and vim.api.nvim_buf_is_valid(p.buf)
+end
+
+---Fetch `key` again; the Info panel re-renders when it arrives.
+local function tracker_fetch(tracker, key)
+  local entry = tracker_issues[key] or {}
+  if entry.fetching then return end
+  entry.fetching = true
+  tracker_issues[key] = entry
+  tracker.get_issue(key, function(issue)
+    tracker_issues[key] = {
+      status = issue and issue.status and issue.status.name or entry.status or "?",
+      summary = issue and issue.summary or entry.summary or "(not found)",
+      at = os.time(),
+    }
+    if info_visible() then M.refresh() end
+  end)
+end
+
+-- A change made through tracker.nvim (status, assignee, edit, …) shows at
+-- once: its events carry the issue key.
+pcall(vim.api.nvim_create_autocmd, "User", {
+  group = vim.api.nvim_create_augroup("ReviewTrackerIssue", { clear = true }),
+  pattern = { "TrackerTransitioned", "TrackerIssueUpdated", "TrackerAssigned", "TrackerBranchCreated" },
+  callback = function(ev)
+    local key = type(ev.data) == "table" and ev.data.key
+    if key and tracker_issues[key] then
+      tracker_issues[key].at = 0 -- stale: fetched again on the next render
+      if info_visible() then M.refresh() end
+    end
+  end,
+})
+
+local tracker_issue
+
+-- Changes made in Jira's web UI: checked when you come back to Neovim or to
+-- the panel (a stale entry is fetched; the panel re-renders only when it
+-- arrives, so the cursor stays put meanwhile).
+pcall(vim.api.nvim_create_autocmd, { "FocusGained", "BufEnter" }, {
+  group = "ReviewTrackerIssue",
+  callback = function(ev)
+    if not info_visible() then return end
+    local p = panel_state()
+    if ev.event == "BufEnter" and ev.buf ~= p.buf then return end
+    local mr = state_mod.state.mr
+    if mr then tracker_issue(mr.source_branch) end
+  end,
+})
+
+---Key and last known details; a stale or missing entry is (re)fetched in
+---the background while the old values stay on screen.
+---@return string|nil key, { status: string, summary: string }|nil details
+function tracker_issue(branch)
+  local ok, tracker = pcall(require, "tracker.api")
+  if not ok or not branch or branch == "" then return nil end
+  local key_ok, key = pcall(tracker.current_issue_key, { branch = branch })
+  if not key_ok or not key then return nil end
+  local entry = tracker_issues[key]
+  if not entry or (entry.at or 0) + TRACKER_FRESH < os.time() then tracker_fetch(tracker, key) end
+  entry = tracker_issues[key]
+  return key, entry and entry.status and entry or nil
+end
+
 local function render_description()
   local p = panel_state()
   p.line_targets = {}
@@ -295,6 +366,15 @@ local function render_description()
   if auto_merge_enabled(mr) then table.insert(header_parts, "auto-merge") end
   table.insert(lines, table.concat(header_parts, "  •  "))
   p.line_targets[#lines] = { kind = "header" }
+
+  -- Issue of the source branch (tracker.nvim): `e` opens it.
+  local issue_key, issue = tracker_issue(mr.source_branch)
+  if issue_key then
+    push_section(lines, p, "tracker", "Issue")
+    push_content(lines, p, "tracker", issue
+      and ("%s  [%s]  %s"):format(issue_key, issue.status, issue.summary)
+      or (issue_key .. "  (loading…)"))
+  end
 
   push_section(lines, p, "draft", "Draft")
   push_content(lines, p, "draft", mr.is_draft and "[x] yes" or "[ ] no")
@@ -364,6 +444,12 @@ local function render_description()
   map("e", function()
     local t = current_target()
     if not t or not t.section then return end
+    if t.section == "tracker" then
+      local key = tracker_issue(mr.source_branch)
+      local ok, tracker = pcall(require, "tracker")
+      if key and ok then tracker.issue(key) end
+      return
+    end
     if M.hooks.on_section_edit then M.hooks.on_section_edit(t.section) end
   end)
   -- j / k move between sections (onto their `── Label ──` header, where `e`
