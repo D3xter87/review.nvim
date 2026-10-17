@@ -431,8 +431,12 @@ the panel; arm or cancel it from |:ReviewMerge|.
 
 INFO ~
 
-  Multi-section view of the MR's metadata. Each editable section has a
-  marker -- press `e` while the cursor is inside it:
+  Multi-section view of the MR's metadata. `j` / `k` jump to the next /
+  previous section (onto its `── Label ──` header, centred with `zz`;
+  inside a tall section `k` first returns to its own header) -- `<Down>` /
+  `<Up>` and `<C-d>` / `<C-u>` still move line by line, e.g. through a long
+  description. Each editable section has a marker -- press `e` while the
+  cursor is inside it:
 
     Draft           toggle (no input -- flips draft state).
                     GitLab encodes draft as a `Draft:` prefix in the title;
@@ -476,13 +480,13 @@ Always-on key-map ~
 
 These keys work in every mode while the panel has focus:
 
-  ]              switch to the next mode (info -> commits -> notes -> info)
-  [              switch to the previous mode (info -> notes -> commits -> info)
+  ] l            switch to the next mode (info -> commits -> notes -> info)
+  [ h            switch to the previous mode (info -> notes -> commits -> info)
   q              end the review session
 
-The mode-specific keys (`e` in Info, `<CR>` / `a` / `d` / etc. in Notes,
+The mode-specific keys (`e` / `j` / `k` in Info, `<CR>` / `a` / `d` / etc. in Notes,
 see |review-notes-keys|) are wired only for their own mode and cleared on
-mode change. `]` / `[` and `q` persist across mode switches so muscle
+mode change. `]` / `[`, `l` / `h` and `q` persist across mode switches so muscle
 memory carries over.
 
 ==============================================================================

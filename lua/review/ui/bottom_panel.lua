@@ -27,14 +27,15 @@ local TITLE = {
 local HINTS = {
   commits = {
     { "<CR>", "open commit diff" },
-    { "[",    "prev mode" },
-    { "]",    "next mode" },
+    { "h/[",  "prev mode" },
+    { "l/]",  "next mode" },
     { "q",    "end review" },
   },
   info = {
+    { "j/k", "sections" },
     { "e", "edit section" },
-    { "[", "prev mode" },
-    { "]", "next mode" },
+    { "h/[", "prev mode" },
+    { "l/]", "next mode" },
     { "q", "end review" },
   },
   notes = {
@@ -46,8 +47,8 @@ local HINTS = {
     { "r",    "toggle resolve" },
     { "R",    "toggle resolve all" },
     { "s",    "cycle sort" },
-    { "[",    "prev mode" },
-    { "]",    "next mode" },
+    { "h/[",  "prev mode" },
+    { "l/]",  "next mode" },
     { "q",    "end review" },
   },
 }
@@ -133,7 +134,9 @@ end
 local function clear_buffer_keymaps()
   local p = panel_state()
   if not p.buf or not vim.api.nvim_buf_is_valid(p.buf) then return end
-  for _, key in ipairs({ "<CR>", "d", "e", "c", "a", "r", "R", "s" }) do
+  -- j / k too: Info maps them to section jumps, the other modes must get
+  -- plain line motion back.
+  for _, key in ipairs({ "<CR>", "d", "e", "c", "a", "r", "R", "s", "j", "k" }) do
     pcall(vim.api.nvim_buf_del_keymap, p.buf, "n", key)
   end
 end
@@ -363,6 +366,42 @@ local function render_description()
     if not t or not t.section then return end
     if M.hooks.on_section_edit then M.hooks.on_section_edit(t.section) end
   end)
+  -- j / k move between sections (onto their `── Label ──` header, where `e`
+  -- edits that section) instead of line by line. <Down> / <Up> and
+  -- <C-d> / <C-u> still scroll through a long description.
+  map("j", function() M.jump_section(1) end)
+  map("k", function() M.jump_section(-1) end)
+end
+
+---Move the Info cursor to the next (dir = 1) / previous (dir = -1) section
+---header. Inside a tall section `k` first returns to its own header.
+---@param dir integer
+function M.jump_section(dir)
+  local p = panel_state()
+  if not p.win or not vim.api.nvim_win_is_valid(p.win) then return end
+  local headers = {}
+  for lnum = 1, vim.api.nvim_buf_line_count(p.buf) do
+    local t = p.line_targets[lnum]
+    if t and t.kind == "section_header" then table.insert(headers, lnum) end
+  end
+  if #headers == 0 then return end
+  local row = vim.api.nvim_win_get_cursor(p.win)[1]
+  local target
+  if dir > 0 then
+    for _, h in ipairs(headers) do
+      if h > row then target = h break end
+    end
+    target = target or headers[#headers]
+  else
+    for i = #headers, 1, -1 do
+      if headers[i] < row then target = headers[i] break end
+    end
+    target = target or headers[1]
+  end
+  vim.api.nvim_win_set_cursor(p.win, { target, 0 })
+  -- Centre it: otherwise a section near the bottom shows only its header,
+  -- its content hidden below the window edge.
+  vim.api.nvim_win_call(p.win, function() vim.cmd("normal! zz") end)
 end
 
 local function render_comments()
@@ -640,13 +679,16 @@ function M.open(initial_mode)
   -- mode-specific (clear_buffer_keymaps doesn't touch them).
   --   q       close the panel (delegates to controller).
   --   ] / [   cycle bottom panel mode forward / backward through
-  --           info -> commits -> notes -> info ...
+  --   l / h   info -> commits -> notes -> info ... (h / l: the panel lines
+  --           don't need horizontal motion, the modes read as columns)
   local opts = { buffer = p.buf, silent = true, noremap = true, nowait = true }
   vim.keymap.set("n", "q", function()
     if M.hooks.on_close then M.hooks.on_close() end
   end, opts)
   vim.keymap.set("n", "]", function() M.cycle_mode(1) end, opts)
   vim.keymap.set("n", "[", function() M.cycle_mode(-1) end, opts)
+  vim.keymap.set("n", "l", function() M.cycle_mode(1) end, opts)
+  vim.keymap.set("n", "h", function() M.cycle_mode(-1) end, opts)
 
   M.set_mode(initial_mode or "commits")
 end
