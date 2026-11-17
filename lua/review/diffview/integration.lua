@@ -58,9 +58,29 @@ local function ensure_revs(repo, mr, cb)
   end)
 end
 
+---The DiffviewOpen call review.nvim is making right now, nil otherwise. Set
+---only for the duration of the (synchronous) command, so diffview's
+---`view_opened` hook — and anything else that reacts to a view appearing —
+---can tell a view of ours from one the user opened. Public as
+---`require("review").diffview_request()`; see |review-diffview-request|.
+---@type { kind: "session"|"commit", rev: string, mr: table|nil }|nil
+M.request = nil
+
+---Runs a :DiffviewOpen command with M.request describing it.
+---@param cmd string
+---@param request table
+---@return boolean ok, any err
+local function diffview_cmd(cmd, request)
+  M.request = request
+  local ok, err = pcall(vim.cmd, cmd)
+  M.request = nil
+  return ok, err
+end
+
 ---Opens DiffviewOpen for the MR's base...head range. Fetches the commits from
 ---origin first when they aren't present locally, and pins diffview to the
----resolved repo with `-C`. Async: `cb(ok, err)`.
+---resolved repo with `-C`. Async: `cb(ok, err, repo)` — `repo` is the root
+---the view was pinned to.
 ---
 ---The `-C<repo>` is essential inside git submodules: without it diffview infers
 ---the repo from the active buffer / cwd, which for a submodule working tree can
@@ -69,7 +89,7 @@ end
 ---and the diff never opens. Pinning to `repo` (where we just verified the
 ---commits exist) makes it deterministic.
 ---@param mr table  normalized MR with base_sha + head_sha
----@param cb fun(ok: boolean, err: string|nil)
+---@param cb fun(ok: boolean, err: string|nil, repo: string|nil)
 function M.open(mr, cb)
   if not mr or not mr.base_sha or not mr.head_sha then
     return cb(false, "MR is missing base/head sha")
@@ -80,9 +100,9 @@ function M.open(mr, cb)
   ensure_revs(repo, mr, function(ok, err)
     if not ok then return cb(false, err) end
 
-    local cmd = string.format("DiffviewOpen -C%s %s...%s",
-      vim.fn.fnameescape(repo), mr.base_sha, mr.head_sha)
-    local vok, verr = pcall(vim.cmd, cmd)
+    local rev = mr.base_sha .. "..." .. mr.head_sha
+    local cmd = string.format("DiffviewOpen -C%s %s", vim.fn.fnameescape(repo), rev)
+    local vok, verr = diffview_cmd(cmd, { kind = "session", rev = rev, mr = mr })
     if not vok then return cb(false, tostring(verr)) end
 
     -- diffview logs rev-parse failures instead of raising them, so a
@@ -94,7 +114,7 @@ function M.open(mr, cb)
     end
 
     state_mod.state.diffview_tabnr = vim.api.nvim_get_current_tabpage()
-    cb(true)
+    cb(true, nil, repo)
   end)
 end
 
@@ -108,7 +128,7 @@ function M.open_rev(rev_arg)
   local cmd = repo
     and string.format("DiffviewOpen -C%s %s", vim.fn.fnameescape(repo), rev_arg)
     or ("DiffviewOpen " .. rev_arg)
-  local ok, err = pcall(vim.cmd, cmd)
+  local ok, err = diffview_cmd(cmd, { kind = "commit", rev = rev_arg })
   if not ok then return false, tostring(err) end
   return true
 end

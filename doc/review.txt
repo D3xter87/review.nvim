@@ -840,6 +840,38 @@ require("review").open({opts})                  ~
   Start (or focus) a review session. `opts` is `{ branch = "..." }` or
   `{ iid = N }`. Same as |:Review| with the corresponding argument.
 
+                                 *review.diffview_request()* *review-diffview-request*
+require("review").diffview_request()            ~
+
+  The `:DiffviewOpen` call review.nvim is making at this very moment, or
+  `nil` when the diff view being opened is not ours. It is set only for the
+  duration of that (synchronous) command, which is exactly when diffview
+  fires its `view_opened` hook -- so a config that decorates every diff
+  view (an extra panel, key-maps, ...) can leave review's views alone:
+>lua
+    require("diffview").setup({
+      hooks = {
+        view_opened = function(view)
+          -- package.loaded: don't load review.nvim just to ask. If it is
+          -- not loaded it cannot be the one opening the view.
+          local review = package.loaded["review"]
+          if review and review.diffview_request() then
+            return  -- review brings its own bottom panel
+          end
+          my_panel.attach(view)
+        end,
+      },
+    })
+<
+  The returned table:
+
+    kind    "session" -- the MR diff a session lives in (gets the bottom
+                         panel, |review-panel|)
+            "commit"  -- the single-commit diff opened with <CR> from the
+                         Commits panel (a plain diffview tab, no panel)
+    rev     the rev argument passed to :DiffviewOpen
+    mr      the normalized MR ("session" only)
+
 ==============================================================================
 18. Troubleshooting                                           *review-trouble*
 

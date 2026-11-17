@@ -28,4 +28,20 @@ function M.open(opts)
   require("review.controller").open(opts)
 end
 
+---The :DiffviewOpen call review.nvim is making right now, or nil when the
+---view being opened is not ours. Meant for diffview hooks (`view_opened`)
+---that add UI of their own to diff views and should leave a review session
+---alone — see |review-diffview-request|.
+---
+---`kind` is "session" for the MR diff a session lives in (it gets the bottom
+---panel) and "commit" for the single-commit diff opened from the Commits
+---panel (a plain diffview tab).
+---@return { kind: "session"|"commit", rev: string, mr: table|nil }|nil
+function M.diffview_request()
+  -- No require: if the integration was never loaded, it is not opening
+  -- anything, and a hook must not pull the plugin in just to ask.
+  local integration = package.loaded["review.diffview.integration"]
+  return integration and integration.request or nil
+end
+
 return M
