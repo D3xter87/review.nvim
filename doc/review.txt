@@ -473,10 +473,31 @@ INFO ~
 
   This is the default mode for new sessions.
 
-COMMITS ~
+COMMITS ~                                              *review-panel-commits*
 
-  List of commits in the MR with `sha . author . subject`. Press `<CR>`
-  on a line to open just that commit's diff via `:DiffviewOpen <sha>^!`.
+  The MR's commits, one row each, laid out like diffview's file history:
+  short sha, files changed, added / deleted lines, ref names, subject,
+  then author and date. The first row sums up the MR as a whole.
+>
+    all       6 files | 120 34 | !42 all changes: 2 commits  feat -> main
+    a1b2c3d4  3 files |  18  7 | (HEAD -> feat) fix: subject  author, 2 hours ago
+    e5f6a7b8  4 files | 102 27 | feat: another subject        author, 3 hours ago
+<
+  The sha, subject and author come from the provider. The stats, ref names
+  and the relative date are read from the local repository after the
+  session opens (the commits are fetched for the diff anyway); until they
+  arrive -- or when a commit is not available locally -- those columns show
+  `-` and the date is the provider's.
+
+  <CR>         on a commit: open just that commit's diff in a new tab
+               (`:DiffviewOpen <sha>^!`); on the `all` row: go to the
+               session's file list
+  K            float with the commit's full message and its stat
+               (`git show --stat`), on the `all` row the stat of the whole
+               MR. The float sits above the row and is as tall as the
+               editor allows. `K` again moves the cursor into it (scroll,
+               yank); `q` / <Esc> there closes it, as does moving the
+               cursor in the panel.
 
 NOTES ~
 
@@ -492,8 +513,9 @@ These keys work in every mode while the panel has focus:
   [ h            switch to the previous mode (info -> notes -> commits -> info)
   q              end the review session
 
-The mode-specific keys (`e` / `j` / `k` in Info, `<CR>` / `a` / `d` / etc. in Notes,
-see |review-notes-keys|) are wired only for their own mode and cleared on
+The mode-specific keys (`e` / `j` / `k` in Info, `<CR>` / `K` in Commits,
+`<CR>` / `a` / `d` / etc. in Notes, see |review-notes-keys|) are wired only
+for their own mode and cleared on
 mode change. `]` / `[`, `l` / `h` and `q` persist across mode switches so muscle
 memory carries over.
 
@@ -700,6 +722,19 @@ Note-preview float only (|review-note-preview|):
   ReviewReplyMarker     `Special`          the reply arrow
   ReviewSeparator       `Comment`          rule between stacked threads
   ReviewDate            `Comment`          "2d ago" in a thread header
+
+Commits panel only (|review-panel-commits|). These link to diffview's own
+groups so the rows read like its file history; the commit float reuses
+ReviewPreviewNormal / ReviewPreviewBorder:
+
+  ReviewCommitAll       `DiffviewFilePanelTitle`       the "all" row label
+  ReviewCommitFiles     `DiffviewFilePanelCounter`     "N files"
+  ReviewCommitAdd       `DiffviewFilePanelInsertions`  added lines
+  ReviewCommitDel       `DiffviewFilePanelDeletions`   deleted lines
+  ReviewCommitSep       `DiffviewNonText`              column separators, "-"
+  ReviewCommitRef       `DiffviewReference`            "(HEAD -> branch, ...)"
+  ReviewCommitSubject   `DiffviewFilePanelFileName`    commit subject
+  ReviewCommitMeta      `DiffviewFilePanelPath`        author, date
 
 ==============================================================================
 13. Icons                                                       *review-icons*

@@ -29,6 +29,7 @@ local config_mod = require("review.config")
 local providers = require("review.providers")
 local git_remote = require("review.http.git_remote")
 local diffview_int = require("review.diffview.integration")
+local git_log = require("review.git.log")
 local readonly = require("review.diffview.readonly")
 local bottom_panel = require("review.ui.bottom_panel")
 local highlights = require("review.ui.highlights")
@@ -351,7 +352,7 @@ end
 local function start_session(provider, remote, branch, full, initial_mode)
   initial_mode = initial_mode or "info"
 
-  diffview_int.open(full.mr, function(ok, err)
+  diffview_int.open(full.mr, function(ok, err, repo)
     if not ok then
       notify((err or "failed to open diffview"), vim.log.levels.ERROR)
       return
@@ -365,6 +366,22 @@ local function start_session(provider, remote, branch, full, initial_mode)
     session.participants = full.participants or {}
     session.branch = branch
     session.provider_name = provider.name
+    session.repo = repo
+
+    -- Diff stats / refs / relative dates for the Commits panel come from the
+    -- local repo (the API's commit list has none). Best-effort and async:
+    -- the panel renders without them and is redrawn when they arrive.
+    if repo then
+      git_log.load(repo, full.mr.base_sha, full.mr.head_sha, function(info)
+        if state_mod.get_for_tab(tabnr) ~= session then return end  -- closed meanwhile
+        session.commit_info = info
+        if vim.api.nvim_get_current_tabpage() == tabnr
+            and session.panel.mode == "commits"
+            and bottom_panel.is_open() then
+          bottom_panel.refresh()
+        end
+      end)
+    end
 
     ctx_by_tab[tabnr] = {
       provider = provider,
@@ -689,6 +706,7 @@ function M.close(tabnr)
   -- Close the preview FIRST: it is a float in this tab, and both the panel
   -- teardown and :DiffviewClose below rearrange the tab's windows.
   pcall(note_preview.close)
+  pcall(require("review.ui.commit_preview").close)
   pcall(bottom_panel.close)
   pcall(highlights.clear)
   pcall(diffview_int.close)

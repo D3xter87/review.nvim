@@ -41,6 +41,16 @@ local GROUPS = {
   ReviewReplyMarker     = "Special",
   ReviewSeparator       = "Comment",
   ReviewDate            = "Comment",
+  -- Commits panel (|review-panel-commits|). Linked to diffview's own groups:
+  -- the rows are laid out like its file history, so they should read alike.
+  ReviewCommitAll       = "DiffviewFilePanelTitle",
+  ReviewCommitFiles     = "DiffviewFilePanelCounter",
+  ReviewCommitAdd       = "DiffviewFilePanelInsertions",
+  ReviewCommitDel       = "DiffviewFilePanelDeletions",
+  ReviewCommitSep       = "DiffviewNonText",
+  ReviewCommitRef       = "DiffviewReference",
+  ReviewCommitSubject   = "DiffviewFilePanelFileName",
+  ReviewCommitMeta      = "DiffviewFilePanelPath",
 }
 
 -- "ready"-state lexicon: which strings map to OK vs blocker styling. The
@@ -254,6 +264,19 @@ function M.apply_commits(buf, lines, line_targets)
     if target and target.kind == "commit" then
       highlight_commit_line(buf, i - 1, line)
     end
+  end
+end
+
+---Applies pre-computed highlight spans. For renderers that know their
+---columns while building a line (the Commits panel) — cheaper and exact,
+---where re-finding the fields with patterns would trip over subjects that
+---look like them.
+---@param buf integer
+---@param marks { [1]: integer, [2]: integer, [3]: integer, [4]: string }[]
+---  { row (0-indexed), start_col, end_col (exclusive), hl_group }
+function M.apply_marks(buf, marks)
+  for _, m in ipairs(marks) do
+    hl(buf, m[1], m[2], m[3], m[4])
   end
 end
 

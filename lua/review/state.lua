@@ -23,6 +23,8 @@ local M = {}
 ---@field diffview_tabnr integer|nil
 ---@field branch string
 ---@field provider_name string
+---@field repo string|nil  repo root the session's diffview is pinned to
+---@field commit_info ReviewCommitInfo|nil  local git stats (review.git.log)
 
 ---@type table<integer, ReviewSession>
 M.sessions = {}

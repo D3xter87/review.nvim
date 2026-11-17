@@ -62,7 +62,7 @@ git checkout feature/login
 
 " bottom panel
 :ReviewInfo                " switch panel to MR info — press 'e' on a section
-:ReviewCommits             " switch to commits — <CR> opens commit diff
+:ReviewCommits             " switch to commits — <CR> opens commit diff, K its message
 :ReviewNotes               " switch to discussion threads
 
 " inside the diff window, in visual mode:
@@ -224,7 +224,7 @@ shortcuts for "open this MR with that panel up front":
 | `:ReviewClose`   | Close MR with an optional farewell comment.              |
 | `:ReviewTime`    | Spent time. Sign picks the op: `1h` sets, `+1h` adds, `-1h` subtracts, `0` clears. No arg → prompt prefilled with the current total. GitLab only. |
 | `:ReviewInfo`    | Bottom panel — MR metadata, editable sections.           |
-| `:ReviewCommits` | Bottom panel — commits, `<CR>` opens commit diff.        |
+| `:ReviewCommits` | Bottom panel — commits with diff stats, author and date; `<CR>` opens commit diff, `K` shows the full message. |
 | `:ReviewNotes`   | Bottom panel — every thread / note / suggestion.         |
 
 Notes panel keys: `<CR>` jump · `a` reply · `c` global · `d` delete ·

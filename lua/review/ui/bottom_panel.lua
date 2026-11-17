@@ -12,6 +12,8 @@ local config_mod = require("review.config")
 local highlights = require("review.ui.highlights")
 local discussion_util = require("review.util.discussion")
 local panel_hl = require("review.ui.panel_highlights")
+local commit_preview = require("review.ui.commit_preview")
+local git_log = require("review.git.log")
 
 local FT = "review-panel"
 
@@ -27,6 +29,7 @@ local TITLE = {
 local HINTS = {
   commits = {
     { "<CR>", "open commit diff" },
+    { "K",    "message" },
     { "h/[",  "prev mode" },
     { "l/]",  "next mode" },
     { "q",    "end review" },
@@ -135,8 +138,8 @@ local function clear_buffer_keymaps()
   local p = panel_state()
   if not p.buf or not vim.api.nvim_buf_is_valid(p.buf) then return end
   -- j / k too: Info maps them to section jumps, the other modes must get
-  -- plain line motion back.
-  for _, key in ipairs({ "<CR>", "d", "e", "c", "a", "r", "R", "s", "j", "k" }) do
+  -- plain line motion back. K is the Commits float.
+  for _, key in ipairs({ "<CR>", "d", "e", "c", "a", "r", "R", "s", "j", "k", "K" }) do
     pcall(vim.api.nvim_buf_del_keymap, p.buf, "n", key)
   end
 end
@@ -155,30 +158,158 @@ end
 
 -- ---------------------------------------------------------------- renderers
 
+-- Commit subjects longer than this are cut with an ellipsis, so the author
+-- and date behind them stay on screen (the panel doesn't wrap).
+local SUBJECT_MAX = 72
+-- Width of the first column: an 8-char short sha, or "all".
+local ID_WIDTH = 8
+
+---Lines for the commit float (`K`) of the row `t`: the full message + stat
+---from the local repo, or what the API gave us when the commit isn't there.
+---@param t table  line target ("all" | "commit")
+---@return string[]|nil
+local function commit_float_lines(t)
+  local s = state_mod.state
+  local mr = s.mr
+  if t.kind == "all" then
+    local lines = s.repo and mr and git_log.describe(s.repo, nil, mr.base_sha, mr.head_sha)
+    if not lines then return nil end
+    table.insert(lines, 1, t.subject)
+    table.insert(lines, 2, "")
+    return lines
+  end
+  if t.kind ~= "commit" then return nil end
+  local lines = s.repo and git_log.describe(s.repo, t.sha)
+  if lines then return lines end
+  local c = t.commit or {}
+  return {
+    "commit " .. (t.sha or "?"),
+    "Author: " .. (c.author_name or "?"),
+    "Date:   " .. (c.created_at or "?"),
+    "",
+    "    " .. (c.title or ""),
+    "",
+    "(commit is not in the local repository: no message body / stat)",
+  }
+end
+
+-- One row per thing the MR consists of, laid out like diffview's file
+-- history so the panel reads like the rest of the tab:
+--
+--   all       6 files | 120 34 | !42 all changes: 2 commits  feat -> main
+--   a1b2c3d4  3 files |  18  7 | (HEAD -> feat) fix: subject…  author, 2 hours ago
+--
+-- The sha / subject / author come from the provider; stats, refs and the
+-- relative date from the local repo (state.commit_info, loaded async by the
+-- controller) — until / unless they arrive the columns show "-" and the date
+-- falls back to the API's.
 local function render_commits()
   local p = panel_state()
   p.line_targets = {}
   local commits = state_mod.state.commits or {}
+  local mr = state_mod.state.mr
+  local info = state_mod.state.commit_info or { by_sha = {} }
   local lines = {}
   if #commits == 0 then
     table.insert(lines, "(no commits)")
     set_lines(lines)
     panel_hl.clear(p.buf)
+    clear_buffer_keymaps()
     return
   end
-  for _, c in ipairs(commits) do
-    local short = c.short_id or (c.id and c.id:sub(1, 8)) or "????????"
-    local line = string.format("%s  %s — %s", short, c.author_name or "?", c.title or "")
-    table.insert(lines, line)
-    p.line_targets[#lines] = { kind = "commit", sha = c.id, short = short }
+
+  local rows = {}
+  if mr then
+    local subject = string.format("!%s all changes: %d commit%s",
+      tostring(mr.iid), #commits, #commits == 1 and "" or "s")
+    table.insert(rows, {
+      id = "all", id_hl = "ReviewCommitAll",
+      stats = info.all,
+      subject = subject,
+      meta = (mr.source_branch or "?") .. " → " .. (mr.target_branch or "?"),
+      target = { kind = "all", subject = subject },
+    })
   end
+  for _, c in ipairs(commits) do
+    local short = c.short_id or (c.id and c.id:sub(1, ID_WIDTH)) or "????????"
+    local extra = (c.id and info.by_sha[c.id]) or {}
+    local date = extra.date or (c.created_at and c.created_at:sub(1, 10))
+    table.insert(rows, {
+      id = short, id_hl = "ReviewSha",
+      stats = extra.stats,
+      refs = extra.refs,
+      subject = c.title or "",
+      meta = (c.author_name or "?") .. (date and (", " .. date) or ""),
+      target = { kind = "commit", sha = c.id, short = short, commit = c },
+    })
+  end
+
+  local w_files, w_adds, w_dels = 1, 1, 1
+  for _, r in ipairs(rows) do
+    if r.stats then
+      w_files = math.max(w_files, #tostring(r.stats.files))
+      w_adds = math.max(w_adds, #tostring(r.stats.adds))
+      w_dels = math.max(w_dels, #tostring(r.stats.dels))
+    end
+  end
+  local function lpad(value, width)
+    return string.rep(" ", math.max(width - #value, 0)) .. value
+  end
+
+  local marks = {}
+  for i, r in ipairs(rows) do
+    local text = ""
+    local function add(str, group)
+      if group then table.insert(marks, { i - 1, #text, #text + #str, group }) end
+      text = text .. str
+    end
+
+    add(r.id .. string.rep(" ", math.max(ID_WIDTH - #r.id, 0)), r.id_hl)
+    if r.stats then
+      local n = r.stats.files
+      add("  " .. lpad(tostring(n), w_files) .. (n == 1 and " file " or " files"), "ReviewCommitFiles")
+      add(" | ", "ReviewCommitSep")
+      add(lpad(tostring(r.stats.adds), w_adds), "ReviewCommitAdd")
+      add(" ")
+      add(lpad(tostring(r.stats.dels), w_dels), "ReviewCommitDel")
+    else
+      add("  " .. lpad("-", w_files) .. "      ", "ReviewCommitSep")
+      add(" | ", "ReviewCommitSep")
+      add(lpad("-", w_adds) .. " " .. lpad("-", w_dels), "ReviewCommitSep")
+    end
+    add(" | ", "ReviewCommitSep")
+    if r.refs then add("(" .. r.refs .. ") ", "ReviewCommitRef") end
+    local subject = r.subject
+    if vim.fn.strchars(subject) > SUBJECT_MAX then
+      subject = vim.fn.strcharpart(subject, 0, SUBJECT_MAX - 1) .. "…"
+    end
+    add(subject, "ReviewCommitSubject")
+    if r.meta then add("  " .. r.meta, "ReviewCommitMeta") end
+
+    table.insert(lines, text)
+    p.line_targets[#lines] = r.target
+  end
+
   set_lines(lines)
   panel_hl.clear(p.buf)
-  panel_hl.apply_commits(p.buf, lines, p.line_targets)
+  panel_hl.apply_marks(p.buf, marks)
   clear_buffer_keymaps()
   map("<CR>", function()
     local t = current_target()
-    if t and t.sha and M.hooks.on_commit_open then M.hooks.on_commit_open(t.sha) end
+    if not t then return end
+    if t.kind == "commit" and t.sha and M.hooks.on_commit_open then
+      M.hooks.on_commit_open(t.sha)
+    elseif t.kind == "all" then
+      -- The session's own diff IS "all changes": go to its file list.
+      pcall(vim.cmd, "DiffviewFocusFiles")
+    end
+  end)
+  -- K: full commit message + stat in a float; K again steps into it.
+  map("K", function()
+    if commit_preview.enter() then return end
+    local t = current_target()
+    local float_lines = t and commit_float_lines(t)
+    if float_lines then commit_preview.open(float_lines, p.win) end
   end)
 end
 
@@ -666,6 +797,9 @@ end
 function M.set_mode(mode)
   if not RENDERERS[mode] then return end
   local p = panel_state()
+  -- A commit float belongs to the rows it was opened from: a re-render or a
+  -- mode switch leaves it pointing at nothing.
+  commit_preview.close()
   p.mode = mode
   if not p.buf or not vim.api.nvim_buf_is_valid(p.buf) then return end
   RENDERERS[mode]()
