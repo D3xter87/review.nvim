@@ -33,6 +33,10 @@ with feature parity.
 - `:ReviewInfo` shows title, description, assignees, reviewers, labels,
   milestone, estimate + spent time (GitLab only), participants, draft
   toggle. Each section is editable (`e`) — text input or checkbox picker.
+- The Info panel's **Approvals** section lists who approved and what is
+  still required: on GitLab with approval rules, each rule with its state
+  and the people who can still approve it; on GitHub, the approvers and
+  the PR's review decision.
 - The Info panel header carries an `auto-merge` marker while the MR is
   **armed for auto-merge** (merge once the pipeline / required checks pass).
   Arm or cancel it from `:ReviewMerge`. Works for auto-merges scheduled by

@@ -400,8 +400,62 @@ function M.fetch_mr_discussions(remote, iid, cb)
   fetch_page()
 end
 
----Fetches approval state for an MR. Returns `{ given, required, approved_by }`
----or nil on failure. Non-fatal in fetch_mr_full.
+---Usernames out of a list of user objects (nil / JSON null → {}).
+local function usernames(list)
+  list = nullable(list)
+  local out = {}
+  if type(list) ~= "table" then return out end
+  for _, u in ipairs(list) do
+    local name = type(u) == "table" and nullable(u.username)
+    if name then table.insert(out, name) end
+  end
+  return out
+end
+
+---One rule of `/approval_state`, reduced to what the Info panel shows.
+local function normalize_approval_rule(raw)
+  if type(raw) ~= "table" then return nil end
+  return {
+    name = nullable(raw.name) or "?",
+    type = nullable(raw.rule_type),
+    required = tonumber(nullable(raw.approvals_required)) or 0,
+    approved = nullable(raw.approved) == true,
+    approved_by = usernames(raw.approved_by),
+    eligible = usernames(raw.eligible_approvers),
+    -- Groups the token cannot see: `eligible` is then incomplete.
+    hidden_groups = nullable(raw.contains_hidden_groups) == true,
+  }
+end
+
+---The approval rules that apply to an MR and how far each one is satisfied.
+---Premium / Ultimate only: anything but a 2xx yields nil (no rules to show).
+---@param cb fun(rules: table[]|nil)
+local function fetch_approval_rules(remote, iid, cb)
+  client.request({
+    url = mr_url(remote, iid, "/approval_state"),
+    method = "get",
+    headers = remote.headers,
+  }, function(res)
+    if not res.ok then return cb(nil) end
+    local raw = client.decode_json(res.body)
+    local list = type(raw) == "table" and nullable(raw.rules)
+    if type(list) ~= "table" then return cb(nil) end
+    local rules = {}
+    for _, r in ipairs(list) do
+      local rule = normalize_approval_rule(r)
+      if rule then table.insert(rules, rule) end
+    end
+    cb(rules)
+  end)
+end
+
+---Fetches approval state for an MR, or nil on failure. Non-fatal in
+---fetch_mr_full. Returns
+---  { given, required, approved_by,   -- everyone who approved (usernames)
+---    approved,                       -- GitLab's verdict: rules satisfied?
+---    rules }                         -- per-rule state, nil when unavailable
+---`approved_by` lists every approver, whether or not the approval counts
+---towards a rule; a rule's own `approved_by` only those that do.
 ---@param remote table
 ---@param iid string|number
 ---@param cb fun(approval: table|nil, err: string|nil)
@@ -415,16 +469,21 @@ function M.fetch_approvals(remote, iid, cb)
     local raw = client.decode_json(res.body)
     if not raw then return cb(nil, "decode failed") end
     local approved_by = {}
-    for _, a in ipairs(raw.approved_by or {}) do
-      if a.user and a.user.username then
-        table.insert(approved_by, a.user.username)
-      end
+    for _, a in ipairs(nullable(raw.approved_by) or {}) do
+      local name = type(a) == "table" and type(a.user) == "table" and nullable(a.user.username)
+      if name then table.insert(approved_by, name) end
     end
-    cb({
+    local approval = {
       given = #approved_by,
       required = nullable(raw.approvals_required),
       approved_by = approved_by,
-    })
+    }
+    local verdict = nullable(raw.approved)
+    if type(verdict) == "boolean" then approval.approved = verdict end
+    fetch_approval_rules(remote, iid, function(rules)
+      approval.rules = rules
+      cb(approval)
+    end)
   end)
 end
 

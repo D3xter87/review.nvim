@@ -564,8 +564,12 @@ three modes; switching modes preserves the panel buffer/window.
 
 The header line shows: !iid . author . source -> target . state . approval
 . ready-to-merge . auto-merge. Approval and ready-to-merge segments only
-appear when the provider has populated them; ready-to-merge is mapped from
-`detailed_merge_status` (GitLab) or `merge_status` (GitHub) into a
+appear when the provider has populated them. The approval segment is a
+count -- `approved (2/2)`, `approved (3)` or `not approved` -- that
+includes approvals satisfying no rule; its colour follows the provider's
+own verdict (rules satisfied?) when there is one. Who approved, and who
+still has to, is the Approvals section of the Info mode. Ready-to-merge is
+mapped from `detailed_merge_status` (GitLab) or `merge_status` (GitHub) into a
 one-token blocker label. The `auto-merge` marker appears only while an
 auto-merge is armed on the MR -- it is the sole auto-merge indicator in
 the panel; arm or cancel it from |:ReviewMerge|.
@@ -601,6 +605,31 @@ INFO ~
     Description     text input (multi-line).
     Assignees       multi-select picker (project members).
     Reviewers       multi-select picker.
+    Approvals       read-only: who approved and what is still required.
+                    Hidden when the provider returned no approval state.
+                    GitLab with approval rules (Premium / Ultimate) shows
+                    one block per rule: >
+                        [x] Backend  1/1
+                            approved: @alice
+                        [ ] Security  0/1
+                            eligible: @bob, @carol
+                        [-] All Members  optional
+                            eligible: anyone
+                        Also approved: @dave
+<                   `[x]` satisfied, `[ ]` not yet, `[-]` optional (zero
+                    approvals required). `eligible` lists who can still
+                    approve a rule that is open; `members of hidden
+                    groups` means the list is incomplete for your token.
+                    `Also approved` are approvals that count towards no
+                    rule. Without rules (GitLab Free) it is `Approved by`
+                    plus `Required: N` (`none` when approvals are
+                    optional).
+                    GitHub shows `Approved by`, `Changes requested by` and
+                    the PR's review decision (approved / changes requested
+                    / review required; absent when the base branch
+                    requires no reviews) -- GitHub does not say who is
+                    required.
+                    Long lists of names are broken to the panel width.
     Labels          multi-select picker.
     Milestone       single-select picker.
     Estimate        text input -- set the time estimate (e.g. `3h30m`);
@@ -840,8 +869,10 @@ dedicated highlight groups, each linked to a sensible default with
   ReviewSha             `Number`           commit SHAs (commits panel)
   ReviewState           `Constant`         opened / merged / closed
   ReviewSectionHeader   `Title`            "-- Title --" section dividers
-  ReviewApprovalOk      `DiagnosticOk`     "approved (N/M)" when satisfied
-  ReviewApprovalMissing `DiagnosticWarn`   "not approved", under-quorum
+  ReviewApprovalOk      `DiagnosticOk`     "approved (N/M)" when satisfied,
+                                           satisfied approval rules
+  ReviewApprovalMissing `DiagnosticWarn`   "not approved", under-quorum,
+                                           open approval rules
   ReviewReady           `DiagnosticOk`     "ready to merge"
   ReviewBlocker         `DiagnosticWarn`   "needs pipeline", "conflicts", ...
   ReviewDraft           `Special`          draft section "[x] yes" / "[ ] no"

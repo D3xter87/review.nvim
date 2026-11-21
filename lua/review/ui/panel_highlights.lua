@@ -143,7 +143,9 @@ end
 
 ---Highlights the !iid header line shared by all modes.
 ---Format: `!IID  by @AUTHOR  •  SRC -> DST  •  STATE  •  approval...  •  ready...`
-local function highlight_iid_header(buf, row, line)
+---@param approval_ok boolean|nil  the provider's verdict on the approvals
+---  (rules satisfied?); nil = unknown, the N/M count decides.
+local function highlight_iid_header(buf, row, line, approval_ok)
   -- !iid
   hl_pattern(buf, row, line, "!%d+", "ReviewIid")
   -- @author
@@ -187,10 +189,12 @@ local function highlight_iid_header(buf, row, line)
     hl(buf, row, s - 1, s - 1 + #"not approved", "ReviewApprovalMissing")
   end
   for ms2, me2 in line:gmatch("()approved %([^)]+%)()") do
-    -- Decide OK vs missing by N/M parsing.
+    -- The provider's verdict wins: N approvals can reach M without
+    -- satisfying the rules. Without one, decide by N/M parsing.
     local seg = line:sub(ms2, me2 - 1)
     local n, m = seg:match("approved %((%d+)/(%d+)%)")
     local ok = (n and m and tonumber(n) >= tonumber(m)) or (not m)
+    if approval_ok ~= nil then ok = approval_ok end
     hl(buf, row, ms2 - 1, me2 - 1, ok and "ReviewApprovalOk" or "ReviewApprovalMissing")
   end
 
@@ -223,12 +227,18 @@ function M.apply_info(buf, lines, line_targets)
     local row = i - 1
     local target = line_targets[i]
     if target and target.kind == "header" then
-      highlight_iid_header(buf, row, line)
+      highlight_iid_header(buf, row, line, target.approval_ok)
     elseif target and target.kind == "section_header" then
       highlight_section_header(buf, row, line)
     elseif target and target.kind == "section_body" then
       -- Within section bodies, apply contextual highlights.
-      if target.section == "draft" then
+      if target.section == "approvals" then
+        -- Rule / verdict lines carry their group: the renderer knows whether
+        -- a rule is satisfied, and rule names are free text.
+        if target.hl then hl(buf, row, 0, #line, target.hl) end
+        hl_pattern(buf, row, line, "%(none%)", "ReviewMuted")
+        hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
+      elseif target.section == "draft" then
         hl_pattern(buf, row, line, "%[[ x]%]%s*%w+", "ReviewDraft")
       elseif target.section == "labels" or target.section == "milestone" or target.section == "assignees" or target.section == "reviewers" then
         hl_pattern(buf, row, line, "%(none%)", "ReviewMuted")

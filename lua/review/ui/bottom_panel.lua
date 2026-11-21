@@ -325,6 +325,7 @@ end
 
 -- Compact "approved (1/2)" / "approved (3)" / "not approved" string.
 -- Returns nil when the provider hasn't populated mr.approval (info skipped).
+-- Who approved, and under which rule, is the Approvals section's job.
 local function format_approval(ap)
   if not ap then return nil end
   local count = #(ap.approved_by or {})
@@ -333,6 +334,18 @@ local function format_approval(ap)
     return string.format("approved (%d/%d)", count, ap.required)
   end
   return string.format("approved (%d)", count)
+end
+
+-- The provider's own answer to "are the approvals enough?": GitLab's
+-- `approved` (rules satisfied) or GitHub's review decision. The count alone
+-- can't tell -- approvals that satisfy no rule are counted too. nil when the
+-- provider gave no verdict (the header then goes by the count).
+---@return boolean|nil
+local function approval_verdict(ap)
+  if not ap then return nil end
+  if ap.approved ~= nil then return ap.approved == true end
+  if ap.decision then return ap.decision == "APPROVED" end
+  return nil
 end
 
 -- Map detailed_merge_status / merge_status into a one-token blocker label.
@@ -396,6 +409,128 @@ local function push_content(lines, p, section_id, text)
     table.insert(lines, l)
     p.line_targets[#lines] = { kind = "section_body", section = section_id }
   end
+end
+
+-- ------------------------------------------------------ Approvals section
+
+-- Cells a line may take before it runs off the panel (which doesn't wrap).
+local function panel_text_width()
+  local p = panel_state()
+  if p and p.win and vim.api.nvim_win_is_valid(p.win) then
+    local info = vim.fn.getwininfo(p.win)[1]
+    local width = vim.api.nvim_win_get_width(p.win) - (info and info.textoff or 0)
+    if width >= 40 then return width end
+  end
+  return 80
+end
+
+---"@a," "@b," "@c" (plus `extra` as a last item); "(none)" when empty.
+local function name_tokens(names, extra)
+  local tokens = {}
+  for _, name in ipairs(names or {}) do table.insert(tokens, "@" .. name) end
+  if extra then table.insert(tokens, extra) end
+  if #tokens == 0 then return { "(none)" } end
+  for i = 1, #tokens - 1 do tokens[i] = tokens[i] .. "," end
+  return tokens
+end
+
+---`label` followed by `tokens`, broken into lines of at most `width` cells;
+---continuation lines are indented to where the first token starts. A list
+---of forty names would otherwise disappear past the panel's right edge.
+---@return string[]
+local function wrap_tokens(label, tokens, width)
+  local cells = vim.fn.strdisplaywidth
+  local pad = string.rep(" ", cells(label))
+  local out, cur, fresh = {}, label, true
+  for _, token in ipairs(tokens) do
+    if not fresh and cells(cur) + 1 + cells(token) > width then
+      table.insert(out, cur)
+      cur, fresh = pad, true
+    end
+    cur = cur .. (fresh and "" or " ") .. token
+    fresh = false
+  end
+  table.insert(out, cur)
+  return out
+end
+
+---`list` without the names in `drop`.
+local function names_except(list, drop)
+  local skip, out = {}, {}
+  for _, name in ipairs(drop or {}) do skip[name] = true end
+  for _, name in ipairs(list or {}) do
+    if not skip[name] then table.insert(out, name) end
+  end
+  return out
+end
+
+local DECISION_LABELS = {
+  APPROVED          = "approved",
+  CHANGES_REQUESTED = "changes requested",
+  REVIEW_REQUIRED   = "review required",
+}
+
+---Who approved and what is still required. With per-rule state (GitLab
+---Premium) one block per rule: `[x]` satisfied / `[ ]` not / `[-]`
+---optional, who approved under it, and -- while it is open -- who else
+---may. Otherwise the plain list of approvers plus whatever the provider
+---says about the requirement.
+---@return { text: string, hl: string|nil }[]
+local function approval_lines(ap, width)
+  local out = {}
+  local function add(lines, hl)
+    for _, l in ipairs(lines) do table.insert(out, { text = l, hl = hl }) end
+  end
+
+  local rules = ap.rules
+  if rules and #rules > 0 then
+    local counted = {}
+    for _, rule in ipairs(rules) do
+      vim.list_extend(counted, rule.approved_by or {})
+      local name = rule.name .. (rule.type == "code_owner" and " (code owner)" or "")
+      local given = #(rule.approved_by or {})
+      if (rule.required or 0) <= 0 then
+        add({ ("[-] %s  optional"):format(name) }, "ReviewMuted")
+      elseif rule.approved then
+        add({ ("[x] %s  %d/%d"):format(name, given, rule.required) }, "ReviewApprovalOk")
+      else
+        add({ ("[ ] %s  %d/%d"):format(name, given, rule.required) }, "ReviewApprovalMissing")
+      end
+      if given > 0 then
+        add(wrap_tokens("    approved: ", name_tokens(rule.approved_by), width))
+      end
+      -- Who can still approve only matters while the rule is open.
+      if not rule.approved or (rule.required or 0) <= 0 then
+        local left = names_except(rule.eligible, rule.approved_by)
+        local extra = rule.hidden_groups and "members of hidden groups" or nil
+        if #left == 0 and not extra and rule.type == "any_approver" then extra = "anyone" end
+        if #left > 0 or extra then
+          add(wrap_tokens("    eligible: ", name_tokens(left, extra), width))
+        end
+      end
+    end
+    -- Approvals that satisfy no rule: counted in the header, required by nobody.
+    local also = names_except(ap.approved_by, counted)
+    if #also > 0 then
+      add(wrap_tokens("Also approved: ", name_tokens(also), width))
+    end
+    return out
+  end
+
+  add(wrap_tokens("Approved by: ", name_tokens(ap.approved_by), width))
+  if ap.changes_requested_by and #ap.changes_requested_by > 0 then
+    add(wrap_tokens("Changes requested by: ", name_tokens(ap.changes_requested_by), width),
+      "ReviewApprovalMissing")
+  end
+  -- nil = the provider doesn't say (GitHub); 0 = approvals are optional.
+  if ap.required then
+    add({ "Required: " .. (ap.required > 0 and tostring(ap.required) or "none") })
+  end
+  if ap.decision then
+    add({ "Review decision: " .. (DECISION_LABELS[ap.decision] or ap.decision:lower()) },
+      ap.decision == "APPROVED" and "ReviewApprovalOk" or "ReviewApprovalMissing")
+  end
+  return out
 end
 
 -- The tracker issue of the MR's source branch, when tracker.nvim is
@@ -496,7 +631,7 @@ local function render_description()
   if ready and ready ~= approval then table.insert(header_parts, ready) end
   if auto_merge_enabled(mr) then table.insert(header_parts, "auto-merge") end
   table.insert(lines, table.concat(header_parts, "  •  "))
-  p.line_targets[#lines] = { kind = "header" }
+  p.line_targets[#lines] = { kind = "header", approval_ok = approval_verdict(mr.approval) }
 
   -- Issue of the source branch (tracker.nvim): `e` opens it.
   local issue_key, issue = tracker_issue(mr.source_branch)
@@ -525,6 +660,15 @@ local function render_description()
 
   push_section(lines, p, "reviewers", "Reviewers")
   push_content(lines, p, "reviewers", user_list_short(mr.reviewers))
+
+  -- Read-only; skipped when the provider returned no approval state.
+  if mr.approval then
+    push_section(lines, p, "approvals", "Approvals")
+    for _, l in ipairs(approval_lines(mr.approval, panel_text_width())) do
+      table.insert(lines, l.text)
+      p.line_targets[#lines] = { kind = "section_body", section = "approvals", hl = l.hl }
+    end
+  end
 
   push_section(lines, p, "labels", "Labels")
   push_content(lines, p, "labels",

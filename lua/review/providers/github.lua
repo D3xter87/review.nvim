@@ -638,10 +638,34 @@ function M.fetch_participants(remote, n, cb)
   end)
 end
 
+---GitHub's own verdict on the PR's reviews: "APPROVED", "CHANGES_REQUESTED"
+---or "REVIEW_REQUIRED". nil when the base branch requires no reviews (the
+---field is null then) or the query fails.
+---@param cb fun(decision: string|nil)
+local function fetch_review_decision(remote, n, cb)
+  M._graphql(remote, [[
+    query($owner: String!, $repo: String!, $n: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $n) { reviewDecision }
+      }
+    }
+  ]], { owner = remote.owner, repo = remote.owner_repo:match("/(.+)$"), n = tonumber(n) or n },
+  function(data)
+    local repo = type(data) == "table" and data.repository
+    local pr = type(repo) == "table" and repo.pullRequest
+    local decision = type(pr) == "table" and pr.reviewDecision
+    cb(type(decision) == "string" and decision or nil)
+  end)
+end
+
 ---Derives approval state from the PR's review timeline. For each user we
 ---keep the latest non-COMMENTED state — APPROVED counts toward `given`,
 ---CHANGES_REQUESTED / DISMISSED do not. GitHub doesn't expose a "required"
----reviewer count in the PR object, so `required` is left nil.
+---reviewer count in the PR object, so `required` is left nil; whether the
+---reviews are enough is GitHub's `reviewDecision`. Returns
+---  { given, required, approved_by,   -- logins with a standing approval
+---    changes_requested_by,           -- logins whose latest review blocks
+---    decision }                      -- see fetch_review_decision, may be nil
 ---@param remote table
 ---@param n integer
 ---@param cb fun(approval: table|nil)
@@ -658,15 +682,27 @@ function M.fetch_approvals(remote, n, cb)
           latest_state_by_user[user] = state
         end
       end
-      local approved_by = {}
+      local approved_by, changes_requested_by = {}, {}
       for user, state in pairs(latest_state_by_user) do
-        if state == "APPROVED" then table.insert(approved_by, user) end
+        if state == "APPROVED" then
+          table.insert(approved_by, user)
+        elseif state == "CHANGES_REQUESTED" then
+          table.insert(changes_requested_by, user)
+        end
       end
-      cb({
-        given = #approved_by,
-        required = nil,
-        approved_by = approved_by,
-      })
+      -- pairs() order is arbitrary; the names are displayed, so keep them
+      -- from reshuffling between refreshes.
+      table.sort(approved_by)
+      table.sort(changes_requested_by)
+      fetch_review_decision(remote, n, function(decision)
+        cb({
+          given = #approved_by,
+          required = nil,
+          approved_by = approved_by,
+          changes_requested_by = changes_requested_by,
+          decision = decision,
+        })
+      end)
     end)
 end
 
