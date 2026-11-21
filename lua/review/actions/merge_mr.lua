@@ -13,9 +13,63 @@ local controller = require("review.controller")
 local merge_dialog = require("review.ui.merge_dialog")
 local auto_merge_watcher = require("review.auto_merge_watcher")
 local notify_util = require("review.util.notify")
+local close_issue = require("review.util.close_issue")
 
 local function notify(msg, level)
   notify_util.legacy(msg, level)
+end
+
+---Makes the description close exactly `refs` before the merge goes out — the
+---forge reads the closing lines at merge time, so they have to be saved first.
+---Unlike the refs trailer this is not best-effort: the caller aborts the merge
+---on error, because merging without the references would silently drop what
+---the user ticked.
+---@param ctx table
+---@param refs string[]      issues to close; empty = remove existing closing lines
+---@param had_lines boolean  the description already carried closing lines
+---@param template string
+---@param cb fun(err: string|nil, changed: boolean)
+local function write_close_issues(ctx, refs, had_lines, template, cb)
+  -- Box left unticked on an MR that never had closing lines: nothing to do,
+  -- and no reason to spend two extra API calls on every merge.
+  if #refs == 0 and not had_lines then return cb(nil, false) end
+
+  local provider, remote, iid = ctx.provider, ctx.remote, ctx.mr.iid
+  if type(provider.fetch_mr_details) ~= "function"
+      or type(provider.update_mr) ~= "function" then
+    return cb("this provider cannot update the description", false)
+  end
+
+  notify_util.progress("updating !" .. tostring(iid) .. " description...")
+  -- ctx.mr may be a stale session snapshot; rewrite what the forge has now.
+  provider.fetch_mr_details(remote, iid, function(fresh, err)
+    if not fresh then return cb(err or "failed to fetch MR", false) end
+    local body = close_issue.apply(fresh.description or "", refs, template)
+    if not body then return cb(nil, false) end
+    provider.update_mr(remote, iid, { description = body }, function(ok, uerr)
+      if not ok then return cb(uerr or "failed to update description", false) end
+      cb(nil, true)
+    end)
+  end)
+end
+
+---Runs the user's `close_issue.on_merged` hook — the place for whatever has
+---to happen outside the forge once the MR is really merged (an issue tracker
+---transition, say). Only for merges that had the box ticked.
+---@param ctx table
+---@param refs string[]
+---@param merged table|nil  the MR as last seen, when the caller has a fresher one
+local function fire_on_merged(ctx, refs, merged)
+  local hook = (require("review.config").get().close_issue or {}).on_merged
+  if type(hook) ~= "function" or #refs == 0 then return end
+  local ok, err = pcall(hook, {
+    refs = vim.deepcopy(refs),
+    mr = merged or ctx.mr,
+    provider = ctx.provider.name,
+  })
+  if not ok then
+    notify("close_issue.on_merged failed: " .. tostring(err), vim.log.levels.WARN)
+  end
 end
 
 -- Maps GitLab's detailed_merge_status to a one-liner the user can act on.
@@ -59,12 +113,23 @@ function M.run(target_opts)
     local default_message = (mr.title or "")
         .. (mr.iid and string.format(" (!%s)", mr.iid) or "")
 
+    -- Closing lines already in the description decide the checkbox's initial
+    -- state; otherwise it starts unticked, prefilled with the branch's issue.
+    local template = close_issue.template()
+    local closing = close_issue.existing(mr.description, template)
+    local had_closing = #closing > 0
+
     merge_dialog.open({
       defaults = {
         delete_source = true,
         squash = mr.squash == true,
       },
       default_message = default_message,
+      close_issues = {
+        refs = had_closing and closing
+            or close_issue.prefill(mr, target_ctx.provider.name),
+        checked = had_closing,
+      },
       blocked_reason = blocked_reason(mr),
       on_submit = function(action, choices)
         local payload = {
@@ -81,38 +146,62 @@ function M.run(target_opts)
           end
         end
 
-        notify_util.progress((action == "auto_merge"
-            and ("scheduling auto-merge for !" .. tostring(mr.iid) .. "...")
-            or ("merging !" .. tostring(mr.iid) .. "...")))
-        target_ctx.provider.merge_mr(target_ctx.remote, mr.iid, payload, function(ok, merr, updated)
-          if not ok then
-            notify((merr or "merge failed"), vim.log.levels.ERROR); return
-          end
-          if action == "auto_merge" then
-            notify("auto-merge scheduled for !" .. tostring(mr.iid))
-            -- Kick off a background poller — survives review session
-            -- teardown and notifies the user when the merge lands or the
-            -- pipeline fails.
-            auto_merge_watcher.watch(target_ctx)
-            -- Refresh details only when targeting the active session so the
-            -- panel reflects the new auto-merge flag.
-            if not is_ephemeral then
-              if updated then
-                local state_mod = require("review.state")
-                target_ctx.mr = updated
-                state_mod.state.mr = updated
+        ---@param description_changed boolean  closing lines were just written
+        local function do_merge(description_changed)
+          notify_util.progress((action == "auto_merge"
+              and ("scheduling auto-merge for !" .. tostring(mr.iid) .. "...")
+              or ("merging !" .. tostring(mr.iid) .. "...")))
+          target_ctx.provider.merge_mr(target_ctx.remote, mr.iid, payload, function(ok, merr, updated)
+            if not ok then
+              notify((merr or "merge failed"), vim.log.levels.ERROR)
+              -- The description edit went through even though the merge did
+              -- not — show it rather than the pre-dialog snapshot.
+              if description_changed and not is_ephemeral then
+                controller.refresh_mr_details()
               end
-              controller.refresh_mr_details()
+              return
             end
-          else
-            notify("!" .. tostring(mr.iid) .. " merged")
-            -- Tear down the local session ONLY when this merge was for the
-            -- active review. Out-of-band merges leave the session intact.
-            if not is_ephemeral then
-              controller.close()
+            if action == "auto_merge" then
+              notify("auto-merge scheduled for !" .. tostring(mr.iid))
+              -- Kick off a background poller — survives review session
+              -- teardown and notifies the user when the merge lands or the
+              -- pipeline fails.
+              auto_merge_watcher.watch(target_ctx, {
+                on_merged = function(merged)
+                  fire_on_merged(target_ctx, choices.close_issues or {}, merged)
+                end,
+              })
+              -- Refresh details only when targeting the active session so the
+              -- panel reflects the new auto-merge flag.
+              if not is_ephemeral then
+                if updated then
+                  local state_mod = require("review.state")
+                  target_ctx.mr = updated
+                  state_mod.state.mr = updated
+                end
+                controller.refresh_mr_details()
+              end
+            else
+              notify("!" .. tostring(mr.iid) .. " merged")
+              fire_on_merged(target_ctx, choices.close_issues or {}, updated)
+              -- Tear down the local session ONLY when this merge was for the
+              -- active review. Out-of-band merges leave the session intact.
+              if not is_ephemeral then
+                controller.close()
+              end
             end
-          end
-        end)
+          end)
+        end
+
+        write_close_issues(target_ctx, choices.close_issues or {}, had_closing, template,
+          function(cerr, changed)
+            if cerr then
+              notify("merge aborted: could not write issue references to the description: "
+                .. cerr, vim.log.levels.ERROR)
+              return
+            end
+            do_merge(changed)
+          end)
       end,
     })
   end)

@@ -21,6 +21,9 @@ local function is_trailer(line)
   return line:lower():match("^%s*refs%s+%S+%s+#time%s") ~= nil
 end
 
+-- Exposed for util/close_issue.lua, which keeps its lines above the trailer.
+M.is_trailer = is_trailer
+
 ---Rebuilds `description` so it ends with exactly one trailer — or with none
 ---when there is no time left to report.
 ---@param description string

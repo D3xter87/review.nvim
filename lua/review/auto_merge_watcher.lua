@@ -84,7 +84,9 @@ local function tick(key)
     if mr.state == "merged" then
       notify_util.event(string.format("!%s auto-merge completed (merged into %s)",
         tostring(mr.iid), mr.target_branch or "?"))
+      local on_merged = w.on_merged
       stop(key)
+      if on_merged then on_merged(mr) end
       return
     end
 
@@ -113,13 +115,19 @@ end
 ---Start watching an auto-merge for the given context. If a watcher already
 ---exists for this (remote, iid) pair we reuse it instead of stacking timers.
 ---@param ctx table  { provider, remote, mr } from controller.with_target
-function M.watch(ctx)
+---@param opts { on_merged: (fun(mr: table))|nil }|nil  on_merged runs once, when the merge lands
+function M.watch(ctx, opts)
   if not ctx or not ctx.mr or not ctx.mr.iid then return end
   local cfg = watcher_cfg()
   if not cfg.enabled then return end
+  local on_merged = opts and opts.on_merged or nil
 
   local key = key_for(ctx.remote, ctx.mr.iid)
-  if watchers[key] then return end  -- already polling this MR
+  if watchers[key] then
+    -- Already polling this MR; the latest dialog's intent wins.
+    watchers[key].on_merged = on_merged
+    return
+  end
 
   local timer = (vim.uv or vim.loop).new_timer()
   watchers[key] = {
@@ -127,6 +135,7 @@ function M.watch(ctx)
     provider = ctx.provider,
     remote = ctx.remote,
     iid = ctx.mr.iid,
+    on_merged = on_merged,
     started_at = (vim.uv or vim.loop).now(),
     timeout_ms = cfg.timeout_ms,
   }

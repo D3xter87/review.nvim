@@ -80,6 +80,26 @@ local defaults = {
     enabled = false,
   },
 
+  -- "Close issue on merge" in the :ReviewMerge dialog adds one line per issue
+  -- to the MR/PR description before merging. `template` is that line, with
+  -- %s standing for the issue reference (PROJ-123, #12). The default is the
+  -- closing keyword GitLab and GitHub both understand; change it when your
+  -- tracker integration expects something else. See |review-close-issue|.
+  --
+  -- The two hooks are how another plugin (an issue tracker, say) or your own
+  -- function takes part; the plugin depends on neither:
+  --   detect(info)     -> what to prefill the list with: a list of references
+  --                       or a string, {} for "nothing", nil for the built-in
+  --                       guess (an issue number in the branch name).
+  --                       info = { branch, mr, provider }
+  --   on_merged(info)  -> called once the MR/PR has actually merged with the
+  --                       box ticked. info = { refs, mr, provider }
+  close_issue = {
+    template  = "Closes %s",
+    detect    = nil,
+    on_merged = nil,
+  },
+
   debug = false,
 }
 

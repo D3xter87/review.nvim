@@ -17,6 +17,7 @@ CONTENTS                                                     *review-contents*
        :ReviewOpen ...................................... |:ReviewOpen|
        :ReviewApprove / :ReviewRevoke ................... |:ReviewApprove|
        :ReviewMerge ..................................... |:ReviewMerge|
+       Close issue on merge ............................. |review-close-issue|
        :ReviewRebase .................................... |:ReviewRebase|
        :ReviewWeb ....................................... |:ReviewWeb|
        :ReviewRequest / :ReviewMine ..................... |:ReviewRequest|
@@ -218,8 +219,9 @@ All action commands accept `[branch|!iid]` as an argument unless noted.
   Open the merge dialog (floating window) for the active session, the
   picked MR, or the target.
 
-  The dialog has three checkboxes -- Delete source branch, Squash commits,
-  Edit commit message -- and two action lines:
+  The dialog has four checkboxes -- Delete source branch, Squash commits,
+  Edit commit message, Close issue on merge (see |review-close-issue|) --
+  and two action lines:
 
     Merge now                       -- immediate `PUT /merge`.
     Set auto-merge (after pipeline) -- GitLab `merge_when_pipeline_succeeds`,
@@ -235,6 +237,118 @@ All action commands accept `[branch|!iid]` as an argument unless noted.
 
   Auto-merge starts a background watcher (see |review-auto-merge|) that
   notifies you when the merge eventually lands or the pipeline fails.
+
+------------------------------------------------------------------------------
+                                                          *review-close-issue*
+Close issue on merge                            ~
+
+  The fourth checkbox of the |:ReviewMerge| dialog makes the merge close
+  one or more issues as well. The plugin does not close anything itself: it
+  writes closing lines into the MR/PR description right before the merge
+  call, and the forge (or its issue-tracker integration) acts on them when
+  the MR merges. Works the same for GitLab and GitHub. >
+    Closes PROJ-123
+    Closes #12
+<
+  Which issues ~
+
+  The checkbox line shows the issues it would close. On its own the plugin
+  only recognises a forge issue number spelled in the MR's SOURCE BRANCH:
+  `issue-12`, `issues/12`, `12-fix-login`, `feature/12-fix-login` all give
+  `#12`. Any other branch -- including one named after an issue tracker key
+  such as `proj-123` -- gives nothing, and the list starts empty. Other
+  sources plug in through `close_issue.detect`, see "Hooks" below.
+
+  Ticking the box opens an input with that list, one issue per line. Replace
+  it, delete it, or add more -- an MR may close several issues. Commas and
+  spaces separate issues too. A bare number becomes `#N`, a tracker key is
+  uppercased, anything else (`group/project#5`, a full issue URL) is kept as
+  typed. The box is ticked only when the list names at least one issue, so
+  with nothing detected you have to type one. Untick and tick again to edit
+  the list.
+
+  What is written ~
+
+  One line per issue, built from `close_issue.template` (default
+  `"Closes %s"`, `%s` being the issue): >
+    require("review").setup({
+      close_issue = { template = "Fixes %s" },
+    })
+<
+  * The lines form one block at the bottom of the description, ABOVE the
+    |review-refs-line| trailer when there is one.
+  * The description is re-fetched first, so an edit made elsewhere since the
+    session opened is not overwritten.
+  * Nothing is sent when the description already closes exactly the listed
+    issues. CRLF line endings are preserved.
+  * A description that already carries such lines opens the dialog with the
+    box TICKED and those issues listed. Unticking it removes the lines
+    before merging.
+  * With the box unticked on an MR without closing lines, the merge does not
+    touch the description at all.
+  * Only lines shaped exactly like the template count. Hand-written
+    variants -- `Fixes #3` under the default template, several issues on
+    one line (`Closes #1, #2`), a keyword inside a sentence -- are neither
+    shown nor touched, so an UNTICKED box does not guarantee the forge
+    closes nothing.
+
+  If the description cannot be fetched or saved, the merge is ABORTED with
+  an error -- merging without the references would silently drop what you
+  ticked. Run |:ReviewMerge| again once the problem is gone.
+
+  What the forge does with it ~
+
+  * GitLab and GitHub close their own issues (`#12`) on a closing keyword
+    only when the MR/PR merges into the project's DEFAULT branch. GitLab
+    additionally lets a project turn auto-closing off in its settings.
+  * A tracker key such as `PROJ-123` is closed only if the forge's
+    integration with that tracker reacts to the line. GitLab's Jira
+    integration understands `Closes KEY-1` when its issue transitions are
+    enabled; other setups may expect different wording -- that is what
+    `close_issue.template` is for.
+  * The template must contain exactly one `%s`; an invalid one falls back
+    to the default with a warning.
+
+  Hooks ~
+
+  The plugin talks to no issue tracker and depends on no other plugin. Two
+  optional functions in `close_issue` let one -- or your own code -- take
+  part:
+
+  `detect(info)` supplies the prefill. `info` is
+  `{ branch = <source branch>, mr = <MR/PR>, provider = "gitlab"|"github" }`.
+  Return a list of references, or a string in any form the input accepts;
+  `{}` to offer nothing; `nil` to fall back to the built-in branch-number
+  guess. It is not consulted when the description already carries closing
+  lines. An error in it is a warning and also falls back.
+
+  `on_merged(info)` runs once the MR/PR has actually merged with the box
+  ticked. `info` is `{ refs = <the ticked list>, mr = <MR/PR>, provider }`.
+  This is the place for anything the forge will not do for you, such as
+  moving the issue in an external tracker. After "Merge now" it runs right
+  away; after "Set auto-merge" it runs when |review-auto-merge| sees the
+  merge land -- so not at all if the watcher is disabled, times out, or
+  Neovim is closed first. An error in it is a warning; the merge stands.
+
+  Every listed reference still gets its line in the description; the hooks
+  add to that, they do not replace it.
+
+  Example -- offering the issue key another plugin derives from the branch
+  (tracker.nvim here), and reporting what was closed: >
+    require("review").setup({
+      close_issue = {
+        detect = function(info)
+          local ok, tracker = pcall(require, "tracker.api")
+          if not ok then return nil end
+          local key = tracker.current_issue_key({ branch = info.branch })
+          return key and { key } or nil
+        end,
+        on_merged = function(info)
+          vim.notify("merged, closing: " .. table.concat(info.refs, ", "))
+        end,
+      },
+    })
+<
 
 ------------------------------------------------------------------------------
                                                                *:ReviewRebase*
@@ -846,6 +960,16 @@ Defaults: >lua
     -- trailer at the bottom of the description. See |review-refs-line|.
     spent_time_refs_line = {
       enabled = false,
+    },
+
+    -- Line written into the description, once per issue, by "Close issue
+    -- on merge" in the :ReviewMerge dialog. %s = the issue reference.
+    -- detect / on_merged are optional hooks for another plugin or your
+    -- own function. See |review-close-issue|.
+    close_issue = {
+      template  = "Closes %s",
+      detect    = nil,  -- fun(info): string[]|string|nil
+      on_merged = nil,  -- fun(info)
     },
 
     debug = false,

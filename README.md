@@ -47,8 +47,17 @@ with feature parity.
   1h 30m` (source branch uppercased). Edited in place, never duplicated,
   and removed when the total hits zero.
 - `:ReviewMerge` opens a merge dialog with **Delete source branch /
-  Squash / Edit commit message** checkboxes and **Merge now / Set
-  auto-merge** actions.
+  Squash / Edit commit message / Close issue on merge** checkboxes and
+  **Merge now / Set auto-merge** actions.
+- **Close issue on merge** writes a closing line per issue (`Closes
+  PROJ-123`, `Closes #12`) into the MR/PR description right before merging,
+  so the merge closes the issue too — on GitLab and GitHub alike. The issue
+  is prefilled when the source branch spells its number (`issue-12`,
+  `12-fix-login`), otherwise you type it; ticking the box lets you replace
+  it, remove it or add more. The line itself is `close_issue.template`, and
+  the `close_issue.detect` / `close_issue.on_merged` hooks let an issue
+  tracker plugin or your own function supply the issues and react once the
+  merge lands.
 - `:ReviewApprove`, `:ReviewRevoke`, `:ReviewMerge`, `:ReviewClose`,
   `:ReviewOpen` all accept an optional `[branch|!iid]` argument so you
   can act on any MR/PR without losing the active review session.
@@ -189,6 +198,16 @@ require("review").setup({
   spent_time_refs_line = {
     enabled = false,
   },
+
+  -- Line written into the description, once per issue, by "Close issue on
+  -- merge" in the :ReviewMerge dialog. %s = the issue (PROJ-123, #12).
+  -- detect / on_merged are optional hooks for another plugin or your own
+  -- function — see :help review-close-issue.
+  close_issue = {
+    template  = "Closes %s",
+    detect    = nil,  -- fun(info): string[]|string|nil  what to prefill
+    on_merged = nil,  -- fun(info)  runs once the MR/PR has merged
+  },
 })
 ```
 
@@ -216,7 +235,7 @@ shortcuts for "open this MR with that panel up front":
 | `:ReviewOpen`    | Reopen a closed MR/PR and start a session.               |
 | `:ReviewApprove` | Approve. Without arg targets the active session or picks from current branch. |
 | `:ReviewRevoke`  | Revoke approval (GitHub: dismiss your latest APPROVED review). |
-| `:ReviewMerge`   | Open merge dialog (squash / delete src / auto-merge).    |
+| `:ReviewMerge`   | Open merge dialog (squash / delete src / close issue / auto-merge). |
 | `:ReviewRebase`  | Rebase source onto target + auto-push (worktree, no local branch change). |
 | `:ReviewWeb`     | Open MR/PR in the default browser (works for any state). |
 | `:ReviewRequest` | List open MRs/PRs where you're a requested reviewer, then open one. |
