@@ -24,6 +24,12 @@ local function nullable(v)
   return v
 end
 
+---nil for nil and "", the string otherwise.
+local function nonempty(s)
+  if s == nil or s == "" then return nil end
+  return s
+end
+
 local notify_util = require("review.util.notify")
 local function notify(msg, level) notify_util.legacy(msg, level) end
 
@@ -1161,7 +1167,14 @@ local function delete_branch(remote, branch, cb)
   end)
 end
 
+---Merge a PR (or schedule auto-merge). `opts` is the same table the GitLab
+---provider takes; GitHub accepts the commit title and description
+---separately, so each is sent only when given and the other keeps GitHub's
+---default — `default_commit_title` is not needed here.
 function M.merge_mr(remote, n, opts, cb)
+  local commit_title = nonempty(opts.commit_title)
+  local commit_body = nonempty(opts.commit_body)
+
   if opts.merge_when_pipeline_succeeds then
     -- Auto-merge — GraphQL only.
     get_pr_node_id(remote, n, function(node_id, err)
@@ -1176,8 +1189,8 @@ function M.merge_mr(remote, n, opts, cb)
         }
       ]], {
         id = node_id, method = merge_method,
-        headline = opts.squash and opts.squash_commit_message or opts.merge_commit_message,
-        body = nil,
+        headline = commit_title,
+        body = commit_body,
       }, function(data, gerr)
         if not data then return cb(false, gerr) end
         cb(true)
@@ -1190,11 +1203,8 @@ function M.merge_mr(remote, n, opts, cb)
     sha = opts.sha,
     merge_method = opts.squash and "squash" or "merge",
   }
-  if opts.squash and opts.squash_commit_message and opts.squash_commit_message ~= "" then
-    payload.commit_title = opts.squash_commit_message
-  elseif opts.merge_commit_message and opts.merge_commit_message ~= "" then
-    payload.commit_title = opts.merge_commit_message
-  end
+  payload.commit_title = commit_title
+  payload.commit_message = commit_body
 
   client.request({
     url = pr_url(remote, n, "/merge"),

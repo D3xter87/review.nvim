@@ -11,6 +11,12 @@ local function nullable(v)
   return v
 end
 
+---nil for nil and "", the string otherwise.
+local function nonempty(s)
+  if s == nil or s == "" then return nil end
+  return s
+end
+
 function M.auth_host_for(remote_host)
   return remote_host
 end
@@ -484,8 +490,9 @@ end
 ---  squash: boolean|nil,
 ---  should_remove_source_branch: boolean|nil,
 ---  merge_when_pipeline_succeeds: boolean|nil,
----  merge_commit_message: string|nil,
----  squash_commit_message: string|nil,
+---  commit_title: string|nil,          -- first line of the merge/squash commit
+---  commit_body: string|nil,           -- the rest of its message
+---  default_commit_title: string|nil,  -- title to use when only commit_body is given
 ---  sha: string|nil,
 ---}
 ---@param cb fun(ok: boolean, err: string|nil, mr: table|nil)
@@ -498,11 +505,20 @@ function M.merge_mr(remote, iid, opts, cb)
   if opts.merge_when_pipeline_succeeds then
     payload.merge_when_pipeline_succeeds = true
   end
-  if opts.merge_commit_message and opts.merge_commit_message ~= "" then
-    payload.merge_commit_message = opts.merge_commit_message
-  end
-  if opts.squash_commit_message and opts.squash_commit_message ~= "" then
-    payload.squash_commit_message = opts.squash_commit_message
+  -- GitLab takes the commit message as one string and, once given one, writes
+  -- nothing of its own. So a custom title alone means a message without a
+  -- body, and a custom body alone needs a title to sit under — its first
+  -- line would become the title otherwise.
+  local title = nonempty(opts.commit_title)
+  local body = nonempty(opts.commit_body)
+  if title or body then
+    title = title or nonempty(opts.default_commit_title)
+    local message = (title and body) and (title .. "\n\n" .. body) or title or body
+    if opts.squash then
+      payload.squash_commit_message = message
+    else
+      payload.merge_commit_message = message
+    end
   end
   if opts.sha and opts.sha ~= "" then payload.sha = opts.sha end
 

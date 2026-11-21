@@ -110,7 +110,7 @@ function M.run(target_opts)
       notify("!" .. tostring(mr.iid) .. " is closed", vim.log.levels.WARN); return
     end
 
-    local default_message = (mr.title or "")
+    local default_title = (mr.title or "")
         .. (mr.iid and string.format(" (!%s)", mr.iid) or "")
 
     -- Closing lines already in the description decide the checkbox's initial
@@ -124,7 +124,7 @@ function M.run(target_opts)
         delete_source = true,
         squash = mr.squash == true,
       },
-      default_message = default_message,
+      default_title = default_title,
       close_issues = {
         refs = had_closing and closing
             or close_issue.prefill(mr, target_ctx.provider.name),
@@ -137,14 +137,14 @@ function M.run(target_opts)
           should_remove_source_branch = choices.delete_source,
           merge_when_pipeline_succeeds = (action == "auto_merge"),
           sha = mr.head_sha,
+          -- Title and description of the merge (or squash) commit, each only
+          -- when its box was ticked. How they reach the forge is the
+          -- provider's business: GitHub takes them separately, GitLab wants
+          -- one message — hence the fallback title for "description only".
+          commit_title = choices.commit_title,
+          commit_body = choices.commit_body,
+          default_commit_title = default_title,
         }
-        if choices.commit_message and choices.commit_message ~= "" then
-          if choices.squash then
-            payload.squash_commit_message = choices.commit_message
-          else
-            payload.merge_commit_message = choices.commit_message
-          end
-        end
 
         ---@param description_changed boolean  closing lines were just written
         local function do_merge(description_changed)

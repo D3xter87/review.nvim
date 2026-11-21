@@ -219,9 +219,9 @@ All action commands accept `[branch|!iid]` as an argument unless noted.
   Open the merge dialog (floating window) for the active session, the
   picked MR, or the target.
 
-  The dialog has four checkboxes -- Delete source branch, Squash commits,
-  Edit commit message, Close issue on merge (see |review-close-issue|) --
-  and two action lines:
+  The dialog has five checkboxes -- Delete source branch, Squash commits,
+  Edit commit title, Edit commit description, Close issue on merge (see
+  |review-close-issue|) -- and two action lines:
 
     Merge now                       -- immediate `PUT /merge`.
     Set auto-merge (after pipeline) -- GitLab `merge_when_pipeline_succeeds`,
@@ -230,6 +230,33 @@ All action commands accept `[branch|!iid]` as an argument unless noted.
 
   Inside the dialog: `<Space>` toggle, `<CR>` activate (toggle on
   checkbox / submit on action), `<Esc>`/`<C-c>`/`q` cancel.
+
+  Ticking "Edit commit title", "Edit commit description" or "Close issue on
+  merge" opens an input right away. The box ends up ticked only when the
+  input is submitted non-empty; cancelling it leaves the box as it was.
+  Untick and tick again to edit what you entered. The checkbox line shows
+  the text / the issues, so the action lines merge exactly what is on
+  screen and never ask anything more.
+
+  The commit title and description are two independent options -- tick
+  either, both or neither. They apply to the squash commit when "Squash
+  commits" is ticked, to the merge commit otherwise.
+
+    Edit commit title        the first line of the commit, prefilled with
+                             `{title} (!{iid})`. Line breaks typed here
+                             collapse into spaces.
+    Edit commit description  everything below the title; starts empty.
+
+  What an unticked one ends up as depends on the forge:
+
+    GitHub  takes the two separately, so the unticked one keeps GitHub's
+            own default.
+    GitLab  takes the message as one text and writes nothing of its own
+            once given one. A custom title alone therefore gives a commit
+            WITHOUT a description, and a custom description alone is put
+            under `{title} (!{iid})` instead of GitLab's default title.
+
+  With both unticked the forge's default message is used unchanged.
 
   After a successful immediate merge, if the target was the active
   session, the local session (diffview tab + bottom panel) is torn down.
@@ -483,11 +510,11 @@ Spent-time refs trailer                         ~
 <
   After every successful |:ReviewTime| (and every `e` on the panel's "Spent
   time" section) the MR description is rewritten so its LAST line reads: >
-    refs CVNT-3456-FEAT #time 1h 30m
+    refs PROJ-123-FEAT #time 1h 30m
 <
   * The name is the MR's SOURCE BRANCH, uppercased verbatim -- no prefix or
-    suffix stripping, so `cvnt-3456-feat` becomes `CVNT-3456-FEAT` and
-    `feature/cvnt-1` becomes `FEATURE/CVNT-1`.
+    suffix stripping, so `proj-123-feat` becomes `PROJ-123-FEAT` and
+    `feature/proj-1` becomes `FEATURE/PROJ-1`.
   * The time is the CURRENT TOTAL after the change, in GitLab's own human
     format (`1h 30m`, `3d 1h`), not the delta you typed.
   * A total of ZERO -- cleared, or subtracted away -- REMOVES the line
@@ -553,7 +580,7 @@ INFO ~
   cursor is inside it:
 
     Issue           (with tracker.nvim installed, when the source branch
-                    names an issue, e.g. `cvnt-3591`) key, status and
+                    names an issue, e.g. `proj-123`) key, status and
                     summary of that issue; `e` opens it in tracker.nvim.
                     Kept current: a change made through tracker.nvim
                     shows at once; one made in Jira's web UI when you

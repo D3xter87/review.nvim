@@ -43,12 +43,14 @@ with feature parity.
   or directly via `:ReviewTime [branch|!iid] [duration]` —
   `:ReviewTime +1h` logs an hour without opening the panel.
 - Opt-in `spent_time_refs_line` keeps a smart-commit trailer at the bottom
-  of the MR description in sync with the total: `refs CVNT-3456-FEAT #time
+  of the MR description in sync with the total: `refs PROJ-123-FEAT #time
   1h 30m` (source branch uppercased). Edited in place, never duplicated,
   and removed when the total hits zero.
 - `:ReviewMerge` opens a merge dialog with **Delete source branch /
-  Squash / Edit commit message / Close issue on merge** checkboxes and
-  **Merge now / Set auto-merge** actions.
+  Squash / Edit commit title / Edit commit description / Close issue on
+  merge** checkboxes and **Merge now / Set auto-merge** actions. The commit
+  title and description are separate options, each opening its own input
+  the moment it is ticked.
 - **Close issue on merge** writes a closing line per issue (`Closes
   PROJ-123`, `Closes #12`) into the MR/PR description right before merging,
   so the merge closes the issue too — on GitLab and GitHub alike. The issue

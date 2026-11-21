@@ -72,7 +72,7 @@ local defaults = {
   },
 
   -- Mirror the MR's total spent time into a trailer line at the very bottom of
-  -- the description: "refs CVNT-3456-FEAT #time 1h 30m" — the source branch
+  -- the description: "refs PROJ-123-FEAT #time 1h 30m" — the source branch
   -- uppercased, plus the current total. Rewritten after every :ReviewTime /
   -- panel "Spent time" edit, removed when the total hits zero. Off by default
   -- — `refs ... #time ...` is an issue-tracker convention, not a GitLab one.
