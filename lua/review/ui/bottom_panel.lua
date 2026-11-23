@@ -970,8 +970,18 @@ end
 ---based on `line_targets[lnum].kind`. Discussion heads start a new fold at
 ---level 1; bodies and replies stay at level 1; everything else (separators,
 ---empty lines) is level 0.
+---
+---A window opened while the panel is current (a `vim.ui.select` picker, a
+---prompt, any float) inherits the panel's fold options, this expression
+---included, and would fold its own lines by the panel's rows. Neovim
+---evaluates a foldexpr with the folded window's buffer as the current one,
+---so anything that is not the panel buffer gets no folds at all.
 function M.fold_expr(lnum)
-  local p = panel_state()
+  -- Such a window can also outlive the session or sit in another tab, where
+  -- there is no session state to index.
+  local session = state_mod.state
+  local p = session and session.panel
+  if not p or vim.api.nvim_get_current_buf() ~= p.buf then return "0" end
   local target = p.line_targets and p.line_targets[lnum]
   if not target then return "0" end
   if target.kind == "discussion_head" then return ">1" end
