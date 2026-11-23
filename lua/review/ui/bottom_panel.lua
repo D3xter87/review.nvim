@@ -60,7 +60,9 @@ local HINTS = {
 local SORT_ORDER = { "status", "file", "date", "author" }
 local SORT_KEYS = {
   status = function(d)
-    -- 0 = unresolved (top), 1 = resolved, 2 = non-resolvable (informational)
+    -- -1 = pending (your own unsent notes, always on top), 0 = unresolved,
+    -- 1 = resolved, 2 = non-resolvable (informational)
+    if d.pending then return -1 end
     if discussion_util.is_resolvable(d) then
       return discussion_util.is_resolved(d) and 1 or 0
     end
@@ -71,7 +73,11 @@ local SORT_KEYS = {
     return (pos and (pos.new_path or pos.old_path)) or "~"  -- tilde sorts last
   end,
   date = function(d)
-    return d.notes[1] and d.notes[1].created_at or ""
+    local created = d.notes[1] and d.notes[1].created_at
+    -- A pending note may carry no date at all (GitLab drafts): it is newer
+    -- than anything published, not older.
+    if d.pending and not created then return "9999" end
+    return created or ""
   end,
   author = function(d)
     return (d.notes[1] and d.notes[1].author) or "~"
@@ -121,6 +127,9 @@ M.hooks = {
   on_comment_resolve_toggle = nil,  -- fun(target)         r
   on_comment_resolve_all = nil,     -- fun()               R
   on_global_comment = nil,          -- fun()
+  on_review_start = nil,            -- fun()               P
+  on_review_submit = nil,           -- fun()               S
+  on_review_discard = nil,          -- fun()               X
   on_close = nil,                   -- fun()
 }
 
@@ -139,7 +148,7 @@ local function clear_buffer_keymaps()
   if not p.buf or not vim.api.nvim_buf_is_valid(p.buf) then return end
   -- j / k too: Info maps them to section jumps, the other modes must get
   -- plain line motion back. K is the Commits float.
-  for _, key in ipairs({ "<CR>", "d", "e", "c", "a", "r", "R", "s", "j", "k", "K" }) do
+  for _, key in ipairs({ "<CR>", "d", "e", "c", "a", "r", "R", "s", "P", "S", "X", "j", "k", "K" }) do
     pcall(vim.api.nvim_buf_del_keymap, p.buf, "n", key)
   end
 end
@@ -780,6 +789,10 @@ local function render_comments()
       local first = d.notes[1]
       local pos = first and first.position
       local icon = highlights.icon_for(d)
+      -- `pending` on a row = the note it shows is not submitted yet. A thread
+      -- head can be published while one of its replies is pending, so the
+      -- flag is per note, not per thread.
+      local first_pending = first and first.pending == true
       local header
       if pos and pos ~= vim.NIL and (pos.new_path or pos.old_path) then
         header = string.format("%s %s:%s  @%s",
@@ -787,15 +800,19 @@ local function render_comments()
           pos.new_path or pos.old_path,
           tostring(pos.new_line or pos.old_line or "?"),
           first.author or "?")
+      elseif first and first.pending_kind == "summary" then
+        header = string.format("%s (review summary)  @%s", icon, first.author or "?")
       else
         header = string.format("%s (global)  @%s", icon, (first and first.author) or "?")
       end
+      if first_pending then header = header .. "  " .. panel_hl.PENDING_TAG end
       table.insert(lines, header)
       p.line_targets[#lines] = {
         kind = "discussion_head",
         discussion_id = d.id,
         note_id = first and first.id,
         position = pos,
+        pending = first_pending,
       }
       local body = (first and first.body) or ""
       for _, l in ipairs(vim.split(body, "\n", { plain = true })) do
@@ -805,15 +822,18 @@ local function render_comments()
           discussion_id = d.id,
           note_id = first and first.id,
           position = pos,
+          pending = first_pending,
         }
       end
       for i = 2, #d.notes do
         local n = d.notes[i]
         if not n.system then
           local first_line = true
+          local who = "@" .. (n.author or "?")
+          if n.pending then who = who .. " " .. panel_hl.PENDING_TAG end
           for _, l in ipairs(vim.split(n.body or "", "\n", { plain = true })) do
             if first_line then
-              table.insert(lines, string.format("    ↳ @%s: %s", n.author or "?", l))
+              table.insert(lines, string.format("    ↳ %s: %s", who, l))
               first_line = false
             else
               table.insert(lines, "         " .. l)
@@ -823,6 +843,7 @@ local function render_comments()
               discussion_id = d.id,
               note_id = n.id,
               position = pos,
+              pending = n.pending == true,
             }
           end
         end
@@ -870,6 +891,17 @@ local function render_comments()
     p.notes_sort = next_sort(p.notes_sort or "status")
     M.refresh()
   end)
+  -- Pending review (review.review_mode). Capitals: none of them is something
+  -- to hit by accident next to d / e / s.
+  map("P", function()
+    if M.hooks.on_review_start then M.hooks.on_review_start() end
+  end)
+  map("S", function()
+    if M.hooks.on_review_submit then M.hooks.on_review_submit() end
+  end)
+  map("X", function()
+    if M.hooks.on_review_discard then M.hooks.on_review_discard() end
+  end)
 end
 
 local RENDERERS = {
@@ -880,9 +912,43 @@ local RENDERERS = {
 
 -- ---------------------------------------------------------------- public API
 
+---Hints of the Notes mode, with the pending-review keys that apply right now:
+---`P` to start one, or `S` / `X` to end the one in progress.
+local function notes_hints()
+  local review = state_mod.state.review
+  local extra
+  if review and review.supported == false then
+    extra = {}
+  elseif review and review.active then
+    extra = { { "S", "submit review" }, { "X", "discard review" } }
+  else
+    extra = { { "P", "start review" } }
+  end
+  local out = {}
+  for _, e in ipairs(HINTS.notes) do
+    -- Keep the mode-switch / quit hints last, as in the other modes.
+    if e[1] == "h/[" then
+      for _, x in ipairs(extra) do table.insert(out, x) end
+    end
+    table.insert(out, e)
+  end
+  return out
+end
+
+---"REVIEW · N pending" (winbar markup) while a review is in progress, nil
+---otherwise. Shown in every mode: what `c` / `s` / `a` do depends on it,
+---wherever the user happens to look.
+local function review_badge()
+  local review = state_mod.state.review
+  if not (review and review.active) then return nil end
+  return string.format("%%#ReviewPending#REVIEW · %d pending%%*", review.count or 0)
+end
+
 local function build_winbar(mode)
   local title = TITLE[mode] or "Panel"
-  local hints = format_hints(HINTS[mode])
+  local hints = format_hints(mode == "notes" and notes_hints() or HINTS[mode])
+  local badge = review_badge()
+  if badge then title = title .. "  " .. badge end
   if mode == "notes" then
     local unresolved, total = discussion_util.counts(state_mod.state.discussions)
     local status_icon

@@ -35,6 +35,7 @@ local bottom_panel = require("review.ui.bottom_panel")
 local highlights = require("review.ui.highlights")
 local note_preview = require("review.ui.note_preview")
 local buffer_keys = require("review.ui.buffer_keys")
+local review_mode = require("review.review_mode")
 local notify_util = require("review.util.notify")
 
 -- Augroups are shared across sessions — callbacks branch on the active
@@ -89,6 +90,27 @@ end
 
 function M.has_session()
   return M.get_active_ctx() ~= nil
+end
+
+---The ctx a command should act on when it may be run from anywhere: the given
+---tab, else the current tab's session, else the session reviewing the branch
+---that is checked out (a review parked in a background tab while the code is
+---read locally — the same rule the gutter signs follow).
+---@param tabnr integer|nil
+---@return ReviewCtx|nil
+function M.resolve_ctx(tabnr)
+  local ctx = M.get_ctx(tabnr)
+  if ctx then return ctx end
+  local _, session_tab = highlights.active_session()
+  return session_tab and ctx_by_tab[session_tab] or nil
+end
+
+---Redraws a session's panel, if that panel is the one on screen.
+---@param tabnr integer
+function M.refresh_panel(tabnr)
+  if vim.api.nvim_get_current_tabpage() == tabnr and bottom_panel.is_open() then
+    bottom_panel.refresh()
+  end
 end
 
 ---Searches every live session for one whose MR matches `iid` (and host).
@@ -210,12 +232,17 @@ function M.refresh_discussions(tabnr)
   local ctx = M.get_ctx(tabnr)
   if not ctx then return end
   local session = state_mod.get_for_tab(ctx.tabnr)
-  ctx.provider.fetch_mr_discussions(ctx.remote, ctx.mr.iid, function(discussions, err)
+  ctx.provider.fetch_mr_discussions(ctx.remote, ctx.mr.iid, function(discussions, err, review)
     if not discussions then
       notify((err or "failed to refresh discussions"), vim.log.levels.WARN)
       return
     end
-    if session then session.discussions = discussions end
+    if session then
+      session.discussions = discussions
+      -- Pending notes arrive woven into `discussions`; `review` describes the
+      -- pending review itself and may switch review mode ON (never off).
+      review_mode.apply(session, review)
+    end
     -- bottom_panel reads the ACTIVE session's panel state, so touching it from
     -- another tab would either act on the wrong panel or index a nil session.
     if vim.api.nvim_get_current_tabpage() == ctx.tabnr
@@ -319,6 +346,15 @@ local function wire_panel_hooks()
   bottom_panel.hooks.on_comment_resolve_all = function()
     require("review.actions.resolve_all").run()
   end
+  bottom_panel.hooks.on_review_start = function()
+    require("review.actions.review_start").run()
+  end
+  bottom_panel.hooks.on_review_submit = function()
+    require("review.actions.review_submit").run()
+  end
+  bottom_panel.hooks.on_review_discard = function()
+    require("review.actions.review_discard").run()
+  end
 end
 
 -- State tag shown in the picker. An opened-but-draft MR reads as "draft"
@@ -363,6 +399,7 @@ local function start_session(provider, remote, branch, full, initial_mode)
     session.mr = full.mr
     session.commits = full.commits
     session.discussions = full.discussions
+    review_mode.apply(session, full.review)
     session.participants = full.participants or {}
     session.branch = branch
     session.provider_name = provider.name

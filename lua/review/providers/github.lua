@@ -18,6 +18,7 @@ M.name = "github"
 local client = require("review.http.client")
 local auth = require("review.http.auth")
 local state_mod = require("review.state")
+local pending_util = require("review.util.pending")
 
 local function nullable(v)
   if v == vim.NIL then return nil end
@@ -53,6 +54,19 @@ local function gh_error(res)
     end
   end
   return res.err or "request failed"
+end
+
+---GitHub allows one pending review per user and PR, and while it exists a
+---standalone review comment or a second review is refused. The raw message
+---("user_id can only have one pending review per pull request") says nothing
+---about the way out, so spell it.
+---@param msg string|nil
+---@return string|nil
+local function pending_hint(msg)
+  if type(msg) == "string" and msg:lower():find("pending review", 1, true) then
+    return msg .. " (you have a review in progress: submit it, with verdict Approve to approve, or discard it)"
+  end
+  return msg
 end
 
 -- --------------------------------------------------------------- url helpers
@@ -468,38 +482,152 @@ function M.fetch_mr_commits(remote, n, cb)
   end)
 end
 
+---Pending review comment (GraphQL) → pending note (review.util.pending).
+---@param c table  PullRequestReviewComment node
+---@param position table|nil  anchor, for the first comment of a new thread
+---@param reply_to string|nil  id of the published discussion it answers
+local function normalize_pending_comment(c, position, reply_to)
+  local author = nullable(c.author)
+  return {
+    id = pending_util.ID_PREFIX .. tostring(nullable(c.databaseId) or nullable(c.id) or ""),
+    pending = true,
+    pending_id = nullable(c.id),  -- GraphQL node id: what the mutations take
+    pending_kind = reply_to and "reply" or "inline",
+    reply_to = reply_to,
+    body = nullable(c.body) or "",
+    author = type(author) == "table" and nullable(author.login) or "?",
+    created_at = nullable(c.createdAt),
+    system = false,
+    resolvable = false,
+    resolved = false,
+    position = position,
+    raw = c,
+  }
+end
+
 ---Fetches review-thread metadata via GraphQL. Returns:
 ---  { thread_id_map = { [comment_db_id] = thread.id, ... },
----    resolved_for_thread = { [thread.id] = boolean, ... } }
-local function fetch_review_threads(remote, n, cb)
-  M._graphql(remote, [[
-    query($owner: String!, $repo: String!, $n: Int!) {
-      repository(owner: $owner, name: $repo) {
-        pullRequest(number: $n) {
-          reviewThreads(first: 100) {
-            nodes {
-              id
-              isResolved
-              comments(first: 100) { nodes { databaseId } }
+---    resolved_for_thread = { [thread.id] = boolean, ... },
+---    pending_review = { node_id, id, body } | nil,   -- the viewer's own
+---    pending_notes = { pending note, ... },          -- its inline comments
+---    pending_ids = { [comment_db_id] = true, ... } }
+---Only the viewer's own pending review is ever visible to the API.
+---
+---`pending_unknown = true` marks a result from the fallback query: resolve
+---data is there, but nothing can be said about a pending review.
+local THREADS_QUERY = [[
+  query($owner: String!, $repo: String!, $n: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $n) {
+        reviews(states: [PENDING], first: 5) {
+          nodes { id databaseId body viewerDidAuthor }
+        }
+        reviewThreads(first: 100) {
+          nodes {
+            id
+            isResolved
+            path
+            line
+            startLine
+            originalLine
+            originalStartLine
+            diffSide
+            comments(first: 100) {
+              nodes { id databaseId body state createdAt author { login } }
             }
           }
         }
       }
     }
-  ]], { owner = remote.owner, repo = remote.owner_repo:match("/(.+)$"), n = n },
-  function(data, err)
-    if not data then return cb(nil, err) end
-    local pr = data.repository and data.repository.pullRequest
-    if not pr or not pr.reviewThreads then return cb({ thread_id_map = {}, resolved_for_thread = {} }) end
-    local map, resolved = {}, {}
-    for _, t in ipairs(pr.reviewThreads.nodes or {}) do
-      resolved[t.id] = t.isResolved == true
-      for _, c in ipairs(t.comments.nodes or {}) do
-        if c.databaseId then map[c.databaseId] = t.id end
+  }
+]]
+
+-- What resolve / unresolve needs and nothing else. Used when the full query
+-- is refused (e.g. a GitHub Enterprise Server whose schema lacks a field):
+-- pending notes are then lost, but threads stay resolvable.
+local THREADS_QUERY_MIN = [[
+  query($owner: String!, $repo: String!, $n: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $n) {
+        reviewThreads(first: 100) {
+          nodes {
+            id
+            isResolved
+            comments(first: 100) { nodes { databaseId } }
+          }
+        }
+      }
+    }
+  }
+]]
+
+local parse_review_threads
+
+local function fetch_review_threads(remote, n, cb)
+  local vars = { owner = remote.owner, repo = remote.owner_repo:match("/(.+)$"), n = tonumber(n) or n }
+  M._graphql(remote, THREADS_QUERY, vars, function(data, err)
+    if data then return cb(parse_review_threads(data)) end
+    M._graphql(remote, THREADS_QUERY_MIN, vars, function(min_data, min_err)
+      if not min_data then return cb(nil, min_err or err) end
+      local out = parse_review_threads(min_data)
+      out.pending_unknown = true
+      cb(out)
+    end)
+  end)
+end
+
+---GraphQL payload of either threads query → the table documented above.
+parse_review_threads = function(data)
+  local out = { thread_id_map = {}, resolved_for_thread = {}, pending_notes = {}, pending_ids = {} }
+  local pr = data.repository and nullable(data.repository.pullRequest)
+  if not pr then return out end
+
+  local reviews = nullable(pr.reviews)
+  for _, r in ipairs(reviews and nullable(reviews.nodes) or {}) do
+    if r.viewerDidAuthor ~= false then
+      out.pending_review = {
+        node_id = nullable(r.id),
+        id = nullable(r.databaseId),
+        body = nullable(r.body) or "",
+      }
+      break
+    end
+  end
+
+  local threads = nullable(pr.reviewThreads)
+  for _, t in ipairs(threads and nullable(threads.nodes) or {}) do
+    out.resolved_for_thread[t.id] = t.isResolved == true
+    local comments = nullable(t.comments)
+    local nodes = comments and nullable(comments.nodes) or {}
+    local root = nodes[1]
+    for i, c in ipairs(nodes) do
+      local db_id = nullable(c.databaseId)
+      if db_id then out.thread_id_map[db_id] = t.id end
+      if c.state == "PENDING" then
+        if db_id then out.pending_ids[db_id] = true end
+        local root_published = root and root.state ~= "PENDING" and nullable(root.databaseId)
+        if i > 1 and root_published then
+          table.insert(out.pending_notes,
+            normalize_pending_comment(c, nil, "inline:" .. tostring(root_published)))
+        elseif i == 1 then
+          local position = pr_comment_position({
+            path = t.path,
+            line = t.line,
+            original_line = t.originalLine,
+            start_line = t.startLine,
+            original_start_line = t.originalStartLine,
+            side = t.diffSide,
+          })
+          table.insert(out.pending_notes, normalize_pending_comment(c, position, nil))
+        else
+          -- A second pending comment in a thread that is itself pending:
+          -- no published thread to hang it on, so show it on its own.
+          table.insert(out.pending_notes, normalize_pending_comment(c, nil, nil))
+        end
       end
     end
-    cb({ thread_id_map = map, resolved_for_thread = resolved })
-  end)
+  end
+  return out
 end
 
 function M.fetch_mr_discussions(remote, n, cb)
@@ -519,7 +647,30 @@ function M.fetch_mr_discussions(remote, n, cb)
     -- inline discussion gets its GraphQL thread_id attached directly (see
     -- below), which is what resolve_discussion reads. No session-scoped
     -- caching needed (and fetch_mr_discussions runs before a session exists).
-    local thread_data = results.threads or { thread_id_map = {}, resolved_for_thread = {} }
+    local thread_data = results.threads
+        or { thread_id_map = {}, resolved_for_thread = {}, pending_notes = {}, pending_ids = {} }
+
+    -- The viewer's own pending review (nobody else's is ever returned). It
+    -- must not render as a published "[pending] ..." entry, and neither must
+    -- its inline comments: they come back as pending notes instead.
+    local pending_rest
+    for _, r in ipairs(results.reviews or {}) do
+      if nullable(r.state) == "PENDING" then pending_rest = r; break end
+    end
+    local pending_review = thread_data.pending_review
+    if not pending_review and pending_rest then
+      pending_review = {
+        node_id = nullable(pending_rest.node_id),
+        id = nullable(pending_rest.id),
+        body = nullable(pending_rest.body) or "",
+      }
+    end
+    local pending_review_id = pending_review and pending_review.id
+    local function is_pending_comment(c)
+      if thread_data.pending_ids[c.id] then return true end
+      local rid = nullable(c.pull_request_review_id)
+      return rid ~= nil and pending_review_id ~= nil and rid == pending_review_id
+    end
 
     local discussions = {}
 
@@ -537,12 +688,17 @@ function M.fetch_mr_discussions(remote, n, cb)
     --    approval status itself.
     for _, r in ipairs(results.reviews or {}) do
       local body = nullable(r.body)
-      if body and body ~= "" then
+      if body and body ~= "" and nullable(r.state) ~= "PENDING" then
         table.insert(discussions, normalize_review(r))
       end
     end
 
     -- 3. Inline comments — group into threads by walking in_reply_to_id.
+    local inline = {}
+    for _, c in ipairs(results.inline or {}) do
+      if not is_pending_comment(c) then table.insert(inline, c) end
+    end
+    results.inline = inline
     local by_id = {}
     for _, c in ipairs(results.inline or {}) do by_id[c.id] = c end
 
@@ -592,7 +748,42 @@ function M.fetch_mr_discussions(remote, n, cb)
       })
     end
 
-    cb(discussions)
+    -- 4. Pending review: its inline comments, plus its body as one "summary"
+    --    note (GitHub has no separate global comments inside a review).
+    local pending_notes = {}
+    for _, note in ipairs(thread_data.pending_notes or {}) do
+      table.insert(pending_notes, note)
+    end
+    if pending_review and pending_review.body ~= "" then
+      table.insert(pending_notes, {
+        id = pending_util.ID_PREFIX .. "summary",
+        pending = true,
+        pending_id = pending_review.node_id,
+        pending_kind = "summary",
+        body = pending_review.body,
+        author = (pending_rest and type(pending_rest.user) == "table"
+          and nullable(pending_rest.user.login)) or "?",
+        system = false,
+        resolvable = false,
+        resolved = false,
+        position = nil,
+        raw = pending_review,
+      })
+    end
+    pending_util.merge(discussions, pending_notes)
+
+    -- Without GraphQL and without a PENDING entry in the REST list nothing is
+    -- known about a pending review: say so (nil) rather than "there is none".
+    local review
+    if (results.threads and not results.threads.pending_unknown) or pending_review then
+      review = {
+        supported = true,
+        exists = pending_review ~= nil,
+        count = #pending_notes,
+        summary = pending_review and nonempty(pending_review.body) or nil,
+      }
+    end
+    cb(discussions, nil, review)
   end
 
   fetch_paginated(issue_url(remote, n, "/comments"), nil, remote.headers, function(list, err)
@@ -711,7 +902,7 @@ function M.fetch_mr_full(remote, n, cb)
     if not mr then return cb(nil, err) end
     M.fetch_mr_commits(remote, n, function(commits, cerr)
       if not commits then return cb(nil, cerr) end
-      M.fetch_mr_discussions(remote, n, function(discussions, derr)
+      M.fetch_mr_discussions(remote, n, function(discussions, derr, review)
         if not discussions then return cb(nil, derr) end
         M.fetch_participants(remote, n, function(participants)
           M.fetch_approvals(remote, n, function(approval)
@@ -720,6 +911,7 @@ function M.fetch_mr_full(remote, n, cb)
               mr = mr,
               commits = commits,
               discussions = discussions,
+              review = review,
               participants = participants or {},
             })
           end)
@@ -741,7 +933,7 @@ function M.approve(remote, n, cb)
     body = vim.json.encode({ event = "APPROVE" }),
   }, function(res)
     if res.ok then return cb(true) end
-    cb(false, gh_error(res))
+    cb(false, pending_hint(gh_error(res)))
   end)
 end
 
@@ -1061,7 +1253,7 @@ function M.post_discussion(remote, n, body, position, cb)
       headers = remote.headers,
       body = vim.json.encode(payload),
     }, function(res)
-      if not res.ok then return cb(false, gh_error(res)) end
+      if not res.ok then return cb(false, pending_hint(gh_error(res))) end
       cb(true)
     end)
   else
@@ -1151,7 +1343,7 @@ function M.add_reply(remote, n, discussion_id, body, cb)
       body = vim.json.encode({ body = body }),
     }, function(res)
       if res.ok then return cb(true) end
-      cb(false, res.err or "failed to reply")
+      cb(false, pending_hint(gh_error(res)))
     end)
   else
     client.request({
@@ -1187,6 +1379,240 @@ function M.resolve_discussion(remote, _, discussion_id, resolved, cb)
   M._graphql(remote, mutation, { id = thread_id }, function(data, err)
     if not data then return cb(false, err) end
     cb(true)
+  end)
+end
+
+-- ------------------------------------------- pending review (GraphQL only)
+--
+-- GitHub keeps the comments of a started review in ONE pending review per
+-- user and PR, visible only to its author until submitted. REST can create a
+-- pending review but cannot add to an existing one, so everything here is
+-- GraphQL. The functions take the note / discussion objects themselves: the
+-- session-state lookups used further up are nil outside the session's tab.
+
+---Verdicts M.submit_review accepts, in the order the submit prompt lists them.
+M.review_verdicts = { "comment", "approve", "request_changes" }
+
+local REVIEW_EVENTS = {
+  comment = "COMMENT",
+  approve = "APPROVE",
+  request_changes = "REQUEST_CHANGES",
+}
+
+---Runs `mutation { <name>(input: $input) { <selection> } }`.
+---@param cb fun(payload: table|nil, err: string|nil)
+local function mutate(remote, name, input_type, selection, input, cb)
+  local query = string.format("mutation($input: %s!) { %s(input: $input) { %s } }",
+    input_type, name, selection)
+  M._graphql(remote, query, { input = input }, function(data, err)
+    if not data then return cb(nil, err) end
+    local payload = nullable(data[name])
+    cb(type(payload) == "table" and payload or {})
+  end)
+end
+
+---The PR's node id and the viewer's pending review on it, if any.
+---@param cb fun(found: { pr_id: string, review_id: string|nil, body: string }|nil, err: string|nil)
+local function find_pending_review(remote, n, cb)
+  M._graphql(remote, [[
+    query($owner: String!, $repo: String!, $n: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $n) {
+          id
+          reviews(states: [PENDING], first: 5) { nodes { id body viewerDidAuthor } }
+        }
+      }
+    }
+  ]], { owner = remote.owner, repo = remote.owner_repo:match("/(.+)$"), n = tonumber(n) or n },
+  function(data, err)
+    if not data then return cb(nil, err) end
+    local pr = data.repository and nullable(data.repository.pullRequest)
+    if not pr or not nullable(pr.id) then return cb(nil, "graphql: no PR id") end
+    local found = { pr_id = pr.id, review_id = nil, body = "" }
+    local reviews = nullable(pr.reviews)
+    for _, r in ipairs(reviews and nullable(reviews.nodes) or {}) do
+      if r.viewerDidAuthor ~= false then
+        found.review_id = nullable(r.id)
+        found.body = nullable(r.body) or ""
+        break
+      end
+    end
+    cb(found)
+  end)
+end
+
+---Like find_pending_review, but starts a pending review when there is none.
+---Looked up on every call rather than cached: the review can be submitted or
+---deleted in the browser at any time, and a stale id would fail the write.
+---@param cb fun(found: { pr_id: string, review_id: string, body: string }|nil, err: string|nil)
+local function ensure_pending_review(remote, n, cb)
+  find_pending_review(remote, n, function(found, err)
+    if not found then return cb(nil, err) end
+    if found.review_id then return cb(found) end
+    mutate(remote, "addPullRequestReview", "AddPullRequestReviewInput",
+      "pullRequestReview { id }", { pullRequestId = found.pr_id },
+      function(payload, cerr)
+        local review = payload and nullable(payload.pullRequestReview)
+        if type(review) == "table" and nullable(review.id) then
+          found.review_id = review.id
+          return cb(found)
+        end
+        -- Two notes saved back to back race for the creation; the loser finds
+        -- the winner's review on a second look.
+        find_pending_review(remote, n, function(again)
+          if again and again.review_id then return cb(again) end
+          cb(nil, cerr or "failed to start a pending review")
+        end)
+      end)
+  end)
+end
+
+local function update_review_body(remote, review_id, body, cb)
+  mutate(remote, "updatePullRequestReview", "UpdatePullRequestReviewInput",
+    "pullRequestReview { id }", { pullRequestReviewId = review_id, body = body },
+    function(payload, err)
+      if not payload then return cb(false, err) end
+      cb(true)
+    end)
+end
+
+---Holds a comment back in the pending review instead of publishing it.
+---
+---  inline (position)          → a new pending thread
+---  reply to an inline thread  → a pending reply in that thread
+---  anything else              → appended to the review's body: a GitHub
+---                               review has ONE summary, no separate global
+---                               comments, and issue comments cannot be held
+---                               back at all.
+---@param remote table
+---@param n string|number
+---@param body string
+---@param position table|nil  M.build_position result (nil = global note)
+---@param opts { reply_to: table|nil }|nil  reply_to = the discussion answered
+---@param cb fun(ok: boolean, err: string|nil)
+function M.create_pending(remote, n, body, position, opts, cb)
+  local reply_to = opts and opts.reply_to
+  local threaded = reply_to ~= nil and reply_to.kind == "inline"
+  if threaded and not reply_to.thread_id then
+    return cb(false, "GitHub: this thread has no GraphQL id (refresh the review), cannot reply in a pending review")
+  end
+  ensure_pending_review(remote, n, function(found, err)
+    if not found then return cb(false, err) end
+    if position then
+      local input = {
+        pullRequestReviewId = found.review_id,
+        path = position.path,
+        line = position.line,
+        side = position.side,
+        body = body,
+      }
+      if position.start_line then
+        input.startLine = position.start_line
+        input.startSide = position.start_side or position.side
+      end
+      mutate(remote, "addPullRequestReviewThread", "AddPullRequestReviewThreadInput",
+        "thread { id }", input, function(payload, merr)
+          if not payload then return cb(false, merr) end
+          -- GitHub answers 200 with `thread: null` for a line it cannot anchor.
+          if type(nullable(payload.thread)) ~= "table" then
+            return cb(false, "GitHub did not accept this position (line not part of the diff?)")
+          end
+          cb(true)
+        end)
+    elseif threaded then
+      mutate(remote, "addPullRequestReviewThreadReply", "AddPullRequestReviewThreadReplyInput",
+        "comment { id }", {
+          pullRequestReviewId = found.review_id,
+          pullRequestReviewThreadId = reply_to.thread_id,
+          body = body,
+        }, function(payload, merr)
+          if not payload then return cb(false, merr) end
+          cb(true)
+        end)
+    else
+      local merged = found.body ~= "" and (found.body .. "\n\n" .. body) or body
+      update_review_body(remote, found.review_id, merged, cb)
+    end
+  end)
+end
+
+---@param note table  pending note (review.util.pending)
+---@param cb fun(ok: boolean, err: string|nil)
+function M.update_pending(remote, _, note, body, cb)
+  if note.pending_kind == "summary" then
+    return update_review_body(remote, note.pending_id, body, cb)
+  end
+  mutate(remote, "updatePullRequestReviewComment", "UpdatePullRequestReviewCommentInput",
+    "pullRequestReviewComment { id }",
+    { pullRequestReviewCommentId = note.pending_id, body = body },
+    function(payload, err)
+      if not payload then return cb(false, err) end
+      cb(true)
+    end)
+end
+
+---@param note table  pending note (review.util.pending)
+---@param cb fun(ok: boolean, err: string|nil)
+function M.delete_pending(remote, _, note, cb)
+  if note.pending_kind == "summary" then
+    return update_review_body(remote, note.pending_id, "", cb)
+  end
+  mutate(remote, "deletePullRequestReviewComment", "DeletePullRequestReviewCommentInput",
+    "clientMutationId", { id = note.pending_id },
+    function(payload, err)
+      if not payload then return cb(false, err) end
+      cb(true)
+    end)
+end
+
+---Submits the pending review with a verdict; with no pending review it
+---creates and submits one in a single step (a bare verdict / summary).
+---`opts.body` REPLACES the review's summary: the submit prompt is prefilled
+---with it, so what comes back is what the user wants published.
+---@param opts { body: string|nil, verdict: string }
+---@param cb fun(ok: boolean, err: string|nil, warning: string|nil)
+function M.submit_review(remote, n, opts, cb)
+  local event = REVIEW_EVENTS[opts.verdict or "comment"]
+  if not event then return cb(false, "unknown verdict: " .. tostring(opts.verdict)) end
+  local body = nonempty(opts.body)
+  find_pending_review(remote, n, function(found, err)
+    if not found then return cb(false, err) end
+    if found.review_id then
+      local input = { pullRequestReviewId = found.review_id, event = event }
+      if body then
+        input.body = body
+      elseif found.body ~= "" then
+        input.body = ""
+      end
+      mutate(remote, "submitPullRequestReview", "SubmitPullRequestReviewInput",
+        "pullRequestReview { id }", input, function(payload, merr)
+          if not payload then return cb(false, merr) end
+          cb(true)
+        end)
+    else
+      local input = { pullRequestId = found.pr_id, event = event }
+      if body then input.body = body end
+      mutate(remote, "addPullRequestReview", "AddPullRequestReviewInput",
+        "pullRequestReview { id }", input, function(payload, merr)
+          if not payload then return cb(false, merr) end
+          cb(true)
+        end)
+    end
+  end)
+end
+
+---Deletes the pending review together with every comment in it.
+---@param cb fun(ok: boolean, err: string|nil)
+function M.discard_review(remote, n, cb)
+  find_pending_review(remote, n, function(found, err)
+    if not found then return cb(false, err) end
+    if not found.review_id then return cb(true) end
+    mutate(remote, "deletePullRequestReview", "DeletePullRequestReviewInput",
+      "clientMutationId", { pullRequestReviewId = found.review_id },
+      function(payload, merr)
+        if not payload then return cb(false, merr) end
+        cb(true)
+      end)
   end)
 end
 

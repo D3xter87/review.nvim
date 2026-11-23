@@ -25,6 +25,7 @@ local M = {}
 ---@field provider_name string
 ---@field repo string|nil  repo root the session's diffview is pinned to
 ---@field commit_info ReviewCommitInfo|nil  local git stats (review.git.log)
+---@field review { active: boolean, supported: boolean|nil, exists: boolean, count: integer, summary: string|nil }
 
 ---@type table<integer, ReviewSession>
 M.sessions = {}
@@ -48,6 +49,9 @@ local function new_session()
     diffview_tabnr = nil,
     branch = "",
     provider_name = "",
+    -- Pending review (review.review_mode). `active` is a latch: new comments
+    -- are held back as pending notes until the review is submitted/discarded.
+    review = { active = false, supported = nil, exists = false, count = 0, summary = nil },
   }
 end
 

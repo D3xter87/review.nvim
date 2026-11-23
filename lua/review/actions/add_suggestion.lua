@@ -9,6 +9,7 @@ local diffview_int = require("review.diffview.integration")
 local input_prompt = require("review.ui.input_prompt")
 local visual = require("review.util.visual")
 local hunks = require("review.util.hunks")
+local review_mode = require("review.review_mode")
 
 local notify_util = require("review.util.notify")
 local function notify(msg, level) notify_util.legacy(msg, level) end
@@ -65,18 +66,21 @@ function M.run()
     start_line = start_line, start_old_line = start_anchor.old_line,
   })
 
+  -- Decided once, here: the title promises where the text goes.
+  local as_pending = review_mode.is_active(ctx)
+
   input_prompt.open({
-    title = string.format("Suggestion"),
+    title = review_mode.title("Suggestion", as_pending),
     prefill = lines,
     on_submit = function(edited)
       local body = ctx.provider.format_suggestion(edited, extra)
-      ctx.provider.post_discussion(ctx.remote, ctx.mr.iid, body, position, function(ok, err)
+      review_mode.post(ctx, as_pending, body, position, function(ok, err)
         if not ok then
           notify((err or "failed to post suggestion"), vim.log.levels.ERROR)
           return
         end
-        notify("suggestion posted")
-        controller.refresh_discussions()
+        notify(as_pending and "suggestion added to pending review" or "suggestion posted")
+        controller.refresh_discussions(ctx.tabnr)
       end)
     end,
   })

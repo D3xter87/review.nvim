@@ -7,6 +7,8 @@ local M = {}
 
 ---@param d table  normalized discussion
 function M.is_resolvable(d)
+  -- A thread that only exists in a not-yet-submitted review (util/pending).
+  if d.pending then return false end
   if d.individual_note then return false end
   for _, n in ipairs(d.notes or {}) do
     if n.resolvable then return true end

@@ -16,6 +16,12 @@ with feature parity.
 - Visual selection in the diff + `c` / `s` posts an inline comment or a
   suggestion (the suggestion's input is **prefilled with the selected
   code** so you just edit it).
+- **Pending review** — `:ReviewStart`, then write as many comments,
+  suggestions and replies as you like: they are held back as 📝 pending
+  notes (GitLab draft notes / GitHub pending review, so they are in the
+  browser too and survive a restart), editable and deletable. `:ReviewSubmit`
+  publishes them all at once with an optional summary and a verdict
+  (Comment / Approve / Request changes); `:ReviewDiscard` drops them.
 - `:ReviewNotes` lists every comment / suggestion / review summary
   (GitHub merges issue + review comments + reviews into one stream).
   Resolve threads (`r` / `R`), reply (`a`), edit / delete, cursor-tracked
@@ -84,6 +90,11 @@ git checkout feature/login
 c                          " add a line/range comment
 s                          " add a suggestion (input pre-filled with code)
 
+" or collect them first and send them together
+:ReviewStart               " from now on c / s / replies are pending notes
+:ReviewSubmit              " verdict + optional summary, publishes them all
+:ReviewDiscard             " ...or throw the pending notes away
+
 " actions on the active MR
 :ReviewApprove             " approve
 :ReviewMerge               " open merge dialog
@@ -108,6 +119,7 @@ tab.
   cmd = {
     "Review", "ReviewOpen",
     "ReviewApprove", "ReviewRevoke",
+    "ReviewStart", "ReviewSubmit", "ReviewDiscard",
     "ReviewInfo", "ReviewCommits", "ReviewNotes",
     "ReviewMerge", "ReviewClose", "ReviewTime",
   },
@@ -241,6 +253,9 @@ shortcuts for "open this MR with that panel up front":
 | `:ReviewOpen`    | Reopen a closed MR/PR and start a session.               |
 | `:ReviewApprove` | Approve. Without arg targets the active session or picks from current branch. |
 | `:ReviewRevoke`  | Revoke approval (GitHub: dismiss your latest APPROVED review). |
+| `:ReviewStart`   | Start a pending review: comments, suggestions and replies are held back as pending notes. |
+| `:ReviewSubmit`  | Publish all pending notes at once: verdict (Comment / Approve / Request changes) + optional summary. |
+| `:ReviewDiscard` | Delete all pending notes without publishing anything.    |
 | `:ReviewMerge`   | Open merge dialog (squash / delete src / close issue / auto-merge). |
 | `:ReviewRebase`  | Rebase source onto target + auto-push (worktree, no local branch change). |
 | `:ReviewWeb`     | Open MR/PR in the default browser (works for any state). |
@@ -254,7 +269,17 @@ shortcuts for "open this MR with that panel up front":
 
 Notes panel keys: `<CR>` jump · `a` reply · `c` global · `d` delete ·
 `e` edit · `r` toggle resolve · `R` toggle resolve all · `s` cycle sort ·
-`q` end review.
+`P` start review · `S` submit review · `X` discard review · `q` end review.
+
+Pending review: once started (`:ReviewStart` / `P`) it stays on until you
+submit or discard it — it never switches itself off, so a comment cannot go
+public by surprise — and it switches itself on when the MR already holds
+pending notes of yours (from the browser or an earlier session). The input
+title says `[pending review]`, the winbar shows `REVIEW · N pending`.
+GitLab needs the Draft Notes API; on GitHub a global comment written in
+review mode becomes part of the review's single summary, and approving goes
+through `:ReviewSubmit` while the pending review exists. Details:
+`:help review-pending`.
 
 Always-on panel keys (any mode): `]` next mode · `[` prev mode · `q` end
 review. Mode order: info → commits → notes (wraps).
@@ -290,6 +315,7 @@ Icons in panel + gutter:
 - 💬 non-resolvable note (issue / review / global) — informational
 - ❌ resolvable thread, unresolved
 - ✅ resolvable thread, fully resolved
+- 📝 pending note of a review you have not submitted yet (only you see it)
 
 ## Help
 

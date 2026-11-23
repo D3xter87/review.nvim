@@ -5,6 +5,8 @@ M.name = "gitlab"
 local client = require("review.http.client")
 local auth = require("review.http.auth")
 local state_mod = require("review.state")
+local pending_util = require("review.util.pending")
+local notify_util = require("review.util.notify")
 
 local function nullable(v)
   if v == vim.NIL then return nil end
@@ -372,9 +374,115 @@ function M.fetch_mr_commits(remote, iid, cb)
   end)
 end
 
+-- ------------------------------------------------ pending review (draft notes)
+--
+-- GitLab keeps the comments of a started review as DRAFT NOTES: visible only
+-- to their author until published. The plugin calls them "pending" (see
+-- review.util.pending) because "draft" already means the MR's draft status.
+
+-- Hosts whose GitLab has no Draft Notes API (older self-managed versions
+-- answer 404). Keyed by API base URL; lives for the nvim process.
+local draft_notes_unsupported = {}
+
+local function draft_notes_url(remote, iid, suffix)
+  return mr_url(remote, iid, "/draft_notes" .. (suffix or ""))
+end
+
+---Draft note → pending note (review.util.pending).
+---@param raw table
+---@param username string|nil  the current user; a draft carries only author_id
+local function normalize_draft_note(raw, username)
+  local position = pending_util.clean_position(raw.position)
+  local reply_to = nonempty(nullable(raw.discussion_id))
+  return {
+    id = pending_util.ID_PREFIX .. tostring(nullable(raw.id) or ""),
+    pending = true,
+    pending_id = nullable(raw.id),
+    pending_kind = reply_to and "reply" or (position and "inline" or "global"),
+    reply_to = reply_to,
+    body = nullable(raw.note) or "",
+    author = username or "?",
+    created_at = nil,
+    system = false,
+    resolvable = false,
+    resolved = false,
+    position = position,
+    raw = raw,
+  }
+end
+
+---Every draft note the current user holds on the MR, as raw API objects.
+---@param cb fun(list: table[]|nil, err: string|nil, unsupported: boolean|nil)
+local function fetch_draft_notes(remote, iid, cb)
+  if draft_notes_unsupported[remote.base_url or "?"] then return cb(nil, nil, true) end
+  local page, max_pages, all = 1, 5, {}
+  local function fetch_page()
+    client.request({
+      url = draft_notes_url(remote, iid),
+      method = "get",
+      headers = remote.headers,
+      query = { per_page = 100, page = page },
+    }, function(res)
+      if not res.ok then
+        -- The MR itself was just read through the same URL prefix, so a 404
+        -- here means the endpoint is missing, not the merge request.
+        if res.status == 404 then
+          draft_notes_unsupported[remote.base_url or "?"] = true
+          return cb(nil, nil, true)
+        end
+        return cb(nil, res.err or "failed to fetch draft notes")
+      end
+      local list, derr = client.decode_json(res.body)
+      if type(list) ~= "table" then return cb(nil, derr or "decode failed") end
+      for _, d in ipairs(list) do table.insert(all, d) end
+      local next_page = client.get_header(res.headers, "x-next-page")
+      if next_page and next_page ~= "" and page < max_pages then
+        page = page + 1
+        fetch_page()
+      else
+        cb(all)
+      end
+    end)
+  end
+  fetch_page()
+end
+
+---Discussions of an MR, with the current user's pending notes woven in.
+---
+---The third callback value describes the pending review:
+---  { supported, exists, count, summary }
+---or nil when it could not be determined (the caller keeps what it had).
+---@param cb fun(discussions: table[]|nil, err: string|nil, review: table|nil)
 function M.fetch_mr_discussions(remote, iid, cb)
   local url = mr_url(remote, iid, "/discussions")
   local page, max_pages, all = 1, 10, {}
+
+  local function finish()
+    local out = {}
+    for _, d in ipairs(all) do table.insert(out, normalize_discussion(d)) end
+    fetch_draft_notes(remote, iid, function(drafts, derr, unsupported)
+      if unsupported then
+        return cb(out, nil, { supported = false, exists = false, count = 0 })
+      end
+      if not drafts then
+        -- Non-fatal: the published threads are still worth showing.
+        notify_util.warn("draft notes failed (" .. tostring(derr) .. "), pending notes not shown")
+        return cb(out, nil, nil)
+      end
+      if #drafts == 0 then
+        return cb(out, nil, { supported = true, exists = false, count = 0 })
+      end
+      get_current_user(remote, function(user)
+        local notes = {}
+        for _, raw in ipairs(drafts) do
+          table.insert(notes, normalize_draft_note(raw, user and user.username))
+        end
+        cb(pending_util.merge(out, notes), nil,
+          { supported = true, exists = true, count = #notes })
+      end)
+    end)
+  end
+
   local function fetch_page()
     client.request({
       url = url,
@@ -391,9 +499,7 @@ function M.fetch_mr_discussions(remote, iid, cb)
         page = page + 1
         fetch_page()
       else
-        local out = {}
-        for _, d in ipairs(all) do table.insert(out, normalize_discussion(d)) end
-        cb(out)
+        finish()
       end
     end)
   end
@@ -492,7 +598,7 @@ function M.fetch_mr_full(remote, iid, cb)
     if not mr then return cb(nil, err) end
     M.fetch_mr_commits(remote, iid, function(commits, cerr)
       if not commits then return cb(nil, cerr) end
-      M.fetch_mr_discussions(remote, iid, function(discussions, derr)
+      M.fetch_mr_discussions(remote, iid, function(discussions, derr, review)
         if not discussions then return cb(nil, derr) end
         M.fetch_participants(remote, iid, function(participants, perr)
           -- Approval state attached to mr.approval; non-fatal — chain
@@ -504,6 +610,7 @@ function M.fetch_mr_full(remote, iid, cb)
               mr = mr,
               commits = commits,
               discussions = discussions,
+              review = review,
               participants = participants or {},
               participants_err = perr,
             })
@@ -912,6 +1019,176 @@ function M.delete_note(remote, iid, discussion_id, note_id, cb)
   }, function(res)
     if res.ok then return cb(true) end
     cb(false, res.err or "failed to delete note")
+  end)
+end
+
+-- ------------------------------------------------- pending review: writes
+
+---Verdicts M.submit_review accepts, in the order the submit prompt lists them.
+M.review_verdicts = { "comment", "approve", "request_changes" }
+
+---Holds a comment back as a draft note instead of publishing it.
+---@param remote table
+---@param iid string|number
+---@param body string
+---@param position table|nil  M.build_position result (nil = global note)
+---@param opts { reply_to: table|nil }|nil  reply_to = the discussion answered
+---@param cb fun(ok: boolean, err: string|nil)
+function M.create_pending(remote, iid, body, position, opts, cb)
+  local payload = { note = body }
+  if position then payload.position = position end
+  local reply_to = opts and opts.reply_to
+  if reply_to then payload.in_reply_to_discussion_id = reply_to.id end
+  client.request({
+    url = draft_notes_url(remote, iid),
+    method = "post",
+    headers = remote.headers,
+    body = vim.json.encode(payload),
+  }, function(res)
+    if res.ok then return cb(true) end
+    if res.status == 404 then
+      return cb(false, "this GitLab has no draft notes API (pending reviews unavailable)")
+    end
+    cb(false, gl_error_detail(res) or res.err or "failed to save pending note")
+  end)
+end
+
+---@param note table  pending note (review.util.pending)
+---@param cb fun(ok: boolean, err: string|nil)
+function M.update_pending(remote, iid, note, body, cb)
+  client.request({
+    url = draft_notes_url(remote, iid, "/" .. tostring(note.pending_id)),
+    method = "put",
+    headers = remote.headers,
+    body = vim.json.encode({ note = body }),
+  }, function(res)
+    if res.ok then return cb(true) end
+    cb(false, gl_error_detail(res) or res.err or "failed to update pending note")
+  end)
+end
+
+---@param note table  pending note (review.util.pending)
+---@param cb fun(ok: boolean, err: string|nil)
+function M.delete_pending(remote, iid, note, cb)
+  client.request({
+    url = draft_notes_url(remote, iid, "/" .. tostring(note.pending_id)),
+    method = "delete",
+    headers = remote.headers,
+  }, function(res)
+    if res.ok then return cb(true) end
+    cb(false, gl_error_detail(res) or res.err or "failed to delete pending note")
+  end)
+end
+
+---Publishes every pending note of the current user in one go.
+---
+---The optional summary travels as one more draft note created right before the
+---bulk publish, so it lands in the same batch (one notification) on every
+---GitLab that has draft notes at all. If the publish then fails the summary
+---draft is removed again, so a retry cannot leave two of them behind.
+---
+---"request_changes" sets the reviewer state; GitLab does not treat it as a
+---formal rejection. "approve" publishes first and approves afterwards: when
+---only the approval fails the review IS published, reported as a warning.
+---@param opts { body: string|nil, verdict: string, count: integer|nil }
+---@param cb fun(ok: boolean, err: string|nil, warning: string|nil)
+function M.submit_review(remote, iid, opts, cb)
+  local verdict = opts.verdict or "comment"
+  local body = nonempty(opts.body)
+
+  -- `reviewer_state` is a newer parameter of bulk_publish, and it only means
+  -- something for a user who is a reviewer of the MR. A GitLab that does not
+  -- know it accepts the request and ignores it, so read the state back: a
+  -- "Request changes" that did not register must not pass for one that did.
+  local function confirm_requested_changes()
+    local not_recorded = "review published, but GitLab did not record \"Request changes\""
+    local unknown = "review published, but could not confirm that GitLab recorded \"Request changes\""
+    get_current_user(remote, function(user)
+      client.request({
+        url = mr_url(remote, iid, "/reviewers"),
+        method = "get",
+        headers = remote.headers,
+      }, function(res)
+        local list = res.ok and client.decode_json(res.body) or nil
+        if type(list) ~= "table" or not user then
+          return cb(true, nil, unknown)
+        end
+        for _, r in ipairs(list) do
+          local u = type(r) == "table" and nullable(r.user)
+          if type(u) == "table" and nullable(u.username) == user.username then
+            if nullable(r.state) == "requested_changes" then return cb(true) end
+            return cb(true, nil, not_recorded .. " (this GitLab version may not support it)")
+          end
+        end
+        cb(true, nil, not_recorded .. " (you are not a reviewer of this merge request)")
+      end)
+    end)
+  end
+
+  local function approve_after()
+    if verdict == "request_changes" then return confirm_requested_changes() end
+    if verdict ~= "approve" then return cb(true) end
+    M.approve(remote, iid, function(ok, aerr)
+      if ok then return cb(true) end
+      cb(true, nil, "review published, but approving failed: " .. tostring(aerr or "?"))
+    end)
+  end
+
+  -- Nothing to publish: an approval on its own is all that is left to do.
+  if not body and (opts.count or 0) == 0 and verdict == "approve" then
+    return M.approve(remote, iid, function(ok, aerr) cb(ok, aerr) end)
+  end
+
+  local function publish(summary_id)
+    local payload = vim.empty_dict()
+    if verdict == "request_changes" then payload = { reviewer_state = "requested_changes" } end
+    client.request({
+      url = draft_notes_url(remote, iid, "/bulk_publish"),
+      method = "post",
+      headers = remote.headers,
+      body = vim.json.encode(payload),
+    }, function(res)
+      if res.ok then return approve_after() end
+      local err = gl_error_detail(res) or res.err or "failed to publish review"
+      if not summary_id then return cb(false, err) end
+      M.delete_pending(remote, iid, { pending_id = summary_id }, function() cb(false, err) end)
+    end)
+  end
+
+  if not body then return publish(nil) end
+  client.request({
+    url = draft_notes_url(remote, iid),
+    method = "post",
+    headers = remote.headers,
+    body = vim.json.encode({ note = body }),
+  }, function(res)
+    if not res.ok then
+      return cb(false, gl_error_detail(res) or res.err or "failed to save review summary")
+    end
+    local raw = client.decode_json(res.body)
+    publish(type(raw) == "table" and nullable(raw.id) or nil)
+  end)
+end
+
+---Deletes every pending note of the current user.
+---@param cb fun(ok: boolean, err: string|nil)
+function M.discard_review(remote, iid, cb)
+  fetch_draft_notes(remote, iid, function(drafts, err, unsupported)
+    if unsupported then return cb(true) end
+    if not drafts then return cb(false, err) end
+    if #drafts == 0 then return cb(true) end
+    local left, failures = #drafts, {}
+    for _, raw in ipairs(drafts) do
+      M.delete_pending(remote, iid, { pending_id = nullable(raw.id) }, function(ok, derr)
+        if not ok then table.insert(failures, derr or "?") end
+        left = left - 1
+        if left > 0 then return end
+        if #failures > 0 then
+          return cb(false, string.format("%d pending note(s) not deleted: %s", #failures, failures[1]))
+        end
+        cb(true)
+      end)
+    end
   end)
 end
 

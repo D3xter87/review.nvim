@@ -28,6 +28,9 @@ local GROUPS = {
   ReviewIconComment     = "DiagnosticInfo",
   ReviewIconUnresolved  = "DiagnosticError",
   ReviewIconResolved    = "DiagnosticOk",
+  -- A note of a review that is not submitted yet, and its "(pending)" tag.
+  ReviewIconPending     = "DiagnosticWarn",
+  ReviewPending         = "DiagnosticWarn",
   ReviewPath            = "Directory",
   ReviewLine            = "Number",
   ReviewSystemNote      = "Comment",
@@ -296,10 +299,20 @@ local ICON_HL = {
   ["💬"] = "ReviewIconComment",
   ["❌"] = "ReviewIconUnresolved",
   ["✅"] = "ReviewIconResolved",
+  ["📝"] = "ReviewIconPending",
 }
 
+-- Tag the panel and the preview float put on a not-yet-submitted note.
+M.PENDING_TAG = "(pending)"
+
+local function highlight_pending_tag(buf, row, line)
+  local s = line:find(M.PENDING_TAG, 1, true)
+  if s then hl(buf, row, s - 1, s - 1 + #M.PENDING_TAG, "ReviewPending") end
+end
+
 local function highlight_thread_head(buf, row, line)
-  -- Icon at start (one of 💬❌✅, multibyte). Find by exact prefix match.
+  highlight_pending_tag(buf, row, line)
+  -- Icon at start (one of 💬❌✅📝, multibyte). Find by exact prefix match.
   for icon, group in pairs(ICON_HL) do
     if line:sub(1, #icon) == icon then
       hl(buf, row, 0, #icon, group)
@@ -333,6 +346,11 @@ function M.apply_notes(buf, lines, line_targets)
       highlight_thread_head(buf, row, line)
     elseif target and (target.kind == "discussion_body" or target.kind == "reply") then
       hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
+      -- Only the reply's own header row carries the tag; a body that happens
+      -- to contain the word must not light up.
+      if target.pending and line:find("↳", 1, true) then
+        highlight_pending_tag(buf, row, line)
+      end
     elseif line == "(no notes)" then
       hl(buf, row, 0, #line, "ReviewMuted")
     end
@@ -362,7 +380,12 @@ function M.apply_note_preview(buf, lines, kinds)
       if ds then hl(buf, row, ds - 1, #line, "ReviewDate") end
     elseif kind == "reply" then
       local marker = line:find("↳", 1, true)
-      if marker then hl(buf, row, marker - 1, marker - 1 + #"↳", "ReviewReplyMarker") end
+      if marker then
+        hl(buf, row, marker - 1, marker - 1 + #"↳", "ReviewReplyMarker")
+        -- Tag sits right after the author, before the colon: "↳ @me (pending):"
+        local ts = line:find(" " .. M.PENDING_TAG .. ":", 1, true)
+        if ts then hl(buf, row, ts, ts + #M.PENDING_TAG, "ReviewPending") end
+      end
       hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
     elseif kind == "body" then
       hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")

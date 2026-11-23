@@ -16,6 +16,7 @@ CONTENTS                                                     *review-contents*
        :Review .......................................... |:Review|
        :ReviewOpen ...................................... |:ReviewOpen|
        :ReviewApprove / :ReviewRevoke ................... |:ReviewApprove|
+       Pending review (start / submit / discard) ........ |review-pending|
        :ReviewMerge ..................................... |:ReviewMerge|
        Close issue on merge ............................. |review-close-issue|
        :ReviewRebase .................................... |:ReviewRebase|
@@ -82,6 +83,7 @@ With `lazy.nvim`: >lua
       cmd = {
         "Review", "ReviewOpen",
         "ReviewApprove", "ReviewRevoke",
+        "ReviewStart", "ReviewSubmit", "ReviewDiscard",
         "ReviewInfo", "ReviewCommits", "ReviewNotes",
         "ReviewMerge", "ReviewRebase", "ReviewClose",
       },
@@ -211,6 +213,87 @@ All action commands accept `[branch|!iid]` as an argument unless noted.
 
   GitHub revoke dismisses the latest APPROVED review by the current user
   via the dismissals endpoint.
+
+------------------------------------------------------------------------------
+                                                              *review-pending*
+                                                                *:ReviewStart*
+                                                               *:ReviewSubmit*
+                                                              *:ReviewDiscard*
+:ReviewStart                                    ~
+:ReviewSubmit                                   ~
+:ReviewDiscard                                  ~
+
+  A pending review: write your comments first, send them all at once. The
+  same thing as "Start a review" on GitLab and GitHub, and stored the same
+  way -- as GitLab draft notes / a GitHub pending review -- so the notes
+  are also there in the browser, survive a restart of Neovim, and nobody
+  but you sees them until you submit.
+
+  `:ReviewStart` switches the session into review mode. From then on these
+  hold the text back as a PENDING note instead of publishing it:
+
+    visual `c` / `s`   line comment / suggestion  (|review-diff-keys|)
+    `a`                reply to a thread          (panel and preview float)
+    `c` in the panel   global comment             (|review-notes-keys|)
+
+  The input window says so in its title (`[pending review]`), and the
+  panel's winbar shows `REVIEW · N pending` in every mode.
+
+  Pending notes are listed with the memo icon and a `(pending)` tag: in the
+  Notes panel (on top in the default sort), in the gutter, and in the
+  |review-note-preview| float. `e` edits and `d` deletes them like any
+  other note; they cannot be resolved or replied to until published.
+
+  `:ReviewSubmit` asks for a verdict and an optional summary comment, then
+  publishes everything in one go:
+
+    Comment           publish the notes (and the summary)
+    Approve           publish, then approve
+    Request changes   publish and ask for changes
+
+  `:ReviewDiscard` deletes every pending note (after a confirmation) and
+  publishes nothing.
+
+  Review mode ends ONLY with submit or discard. It does not switch itself
+  off when you delete the last pending note or when a refresh fails, so a
+  comment can never go public by surprise. It switches itself ON, with a
+  notification, when the MR already has pending notes of yours -- written
+  in the browser or in an earlier session.
+
+  The three commands act on the session of the current tab, or, from any
+  other tab, on the session reviewing the checked-out branch. In the Notes
+  panel they are `P` / `S` / `X`.
+
+  Provider differences:
+
+  GitLab ~
+    * Needs the Draft Notes API. On an instance without it review mode is
+      unavailable and says so.
+    * A global comment is a pending note of its own.
+    * The summary is published as one more note in the same batch.
+    * "Request changes" sets your reviewer state (`requested_changes`). It
+      is not a formal rejection, it needs a GitLab recent enough to know
+      reviewer states, and you must be a reviewer of the MR. The state is
+      read back after publishing: if GitLab did not record it, the notes
+      are still published and a warning says the verdict was not.
+    * "Approve" publishes first and approves second: if only the approval
+      fails, the notes ARE published and a warning tells you so.
+
+  GitHub ~
+    * One pending review per user and PR. While it exists GitHub is
+      expected to refuse ordinary line comments and a plain
+      |:ReviewApprove| (the error then carries a hint) -- so review mode
+      is on for as long as the pending review is, and approving happens
+      through `:ReviewSubmit` with the Approve verdict.
+    * Should the PR's review threads not be readable in full (an older
+      GitHub Enterprise Server), pending notes are not shown; resolving
+      threads keeps working.
+    * A review has ONE summary and no global comments of its own: a global
+      comment written in review mode, and a reply to a global note, are
+      appended to the summary (shown as `(review summary)` in the panel
+      and prefilled into the `:ReviewSubmit` prompt).
+    * Only the first 100 review threads of a PR are inspected for pending
+      comments.
 
 ------------------------------------------------------------------------------
                                                                 *:ReviewMerge*
@@ -700,6 +783,9 @@ In *visual mode* you get two extra mappings:
        you edit the existing code; on submit it's wrapped in a
        ```suggestion fenced block.
 
+Both publish immediately -- unless a pending review is in progress
+(|review-pending|), in which case they are held back until you submit it.
+
 The plugin auto-scrolls the |:ReviewNotes| panel as the cursor moves
 through the diff: when a comment is anchored to the cursor's line, the
 panel jumps to that thread. See |review-note-preview| for reading that
@@ -831,7 +917,14 @@ Inside `:ReviewNotes`:
                  resolved, unresolve them)
   s              cycle sort order: status -> file -> date -> author. The
                  winbar shows the active mode as `sort: <name>`.
+  P              start a pending review (|review-pending|)
+  S              submit the pending review (verdict + optional summary)
+  X              discard the pending review
   q              end the review session
+
+`a`, `c`, `d` and `e` follow the pending review: while one is in progress
+`a` / `c` add pending notes, and `d` / `e` work on pending notes as well as
+on published ones. The winbar lists `P`, or `S` and `X`, whichever applies.
 
 |review-note-preview| is the in-code counterpart of `<CR>`: instead of
 jumping from the panel to the code, it brings the thread to the code, with
@@ -880,6 +973,8 @@ dedicated highlight groups, each linked to a sensible default with
   ReviewIconComment     `DiagnosticInfo`   speech-bubble note icon
   ReviewIconUnresolved  `DiagnosticError`  cross-mark thread icon
   ReviewIconResolved    `DiagnosticOk`     check-mark thread icon
+  ReviewIconPending     `DiagnosticWarn`   memo icon of a pending note
+  ReviewPending         `DiagnosticWarn`   "(pending)" tag, winbar "REVIEW"
   ReviewPath            `Directory`        file paths in note headers
   ReviewLine            `Number`           line numbers in note headers
   ReviewMuted           `Comment`          "(global)", "(none)", "(empty)"
@@ -911,13 +1006,16 @@ ReviewPreviewNormal / ReviewPreviewBorder:
 ==============================================================================
 13. Icons                                                       *review-icons*
 
-Bottom panel and diff gutter use three icons (rendered as Unicode emoji
-at runtime: speech-bubble, cross-mark, check-mark):
+Bottom panel and diff gutter use four icons (rendered as Unicode emoji
+at runtime: speech-bubble, cross-mark, check-mark, memo):
 
   speech-bubble   non-resolvable note (issue comment / review summary /
                   individual note) -- informational only.
   cross-mark      resolvable thread, at least one note unresolved.
   check-mark      resolvable thread, fully resolved.
+  memo            pending note of a review you have not submitted yet
+                  (|review-pending|) -- visible to you only. Never counted
+                  in `<unresolved>/<total>`.
 
 The Notes winbar shows `<unresolved>/<total>` plus the matching status
 icon. A gutter icon also marks where |review-note-preview| is available.
@@ -1097,6 +1195,17 @@ require("review").diffview_request()            ~
     surfaces the message verbatim ("Validation Failed: Can not approve
     your own pull request"). Other 422s: PR is in draft, you have already
     approved, or token scope is too narrow.
+
+"... one pending review per pull request" (GitHub):
+    You have a review in progress on that PR (|review-pending|) -- maybe
+    one started in the browser. GitHub then refuses ordinary line comments
+    and a plain approve. Submit it (`:ReviewSubmit`, verdict Approve to
+    approve) or drop it (`:ReviewDiscard`).
+
+"pending reviews are not available on this server":
+    The GitLab instance has no Draft Notes API (the request for the MR's
+    draft notes answered 404). Comments still work; they just publish
+    immediately.
 
 "GitHub: this thread isn't resolvable":
     The discussion is an issue comment or a review summary -- only inline

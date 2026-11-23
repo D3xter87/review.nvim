@@ -30,6 +30,10 @@ function M.run(target, tabnr)
 
   local d = find_discussion(target.discussion_id, tabnr)
   if not d then return end
+  if d.pending then
+    notify("this note is still pending: nothing to resolve until the review is submitted", vim.log.levels.WARN)
+    return
+  end
   if not discussion_util.is_resolvable(d) then
     notify("this thread is not resolvable", vim.log.levels.WARN)
     return

@@ -5,7 +5,10 @@
 local M = {}
 
 local controller = require("review.controller")
+local state_mod = require("review.state")
 local input_prompt = require("review.ui.input_prompt")
+local pending_util = require("review.util.pending")
+local review_mode = require("review.review_mode")
 
 local notify_util = require("review.util.notify")
 local function notify(msg, level) notify_util.legacy(msg, level) end
@@ -22,21 +25,33 @@ function M.run(target, tabnr)
     return
   end
 
+  local session = state_mod.get_for_tab(ctx.tabnr)
+  local discussion = pending_util.find_discussion(session and session.discussions, target.discussion_id)
+  -- A thread that exists only in the pending review has nothing published to
+  -- answer yet (and on GitHub a reply to it would land as a public comment).
+  if discussion and discussion.pending then
+    notify("this note is still pending: edit it (e) instead of replying", vim.log.levels.WARN)
+    return
+  end
+
+  -- Decided once, here: the title promises where the text goes.
+  local as_pending = review_mode.is_active(ctx)
+
   input_prompt.open({
-    title = "Reply to thread",
+    title = review_mode.title("Reply to thread", as_pending),
     on_submit = function(lines)
       local body = table.concat(lines, "\n")
       if body:gsub("%s", "") == "" then
         notify("empty reply, skipped", vim.log.levels.WARN)
         return
       end
-      ctx.provider.add_reply(ctx.remote, ctx.mr.iid, target.discussion_id, body, function(ok, err)
+      review_mode.reply(ctx, as_pending, discussion, target.discussion_id, body, function(ok, err)
         if not ok then
           notify((err or "failed to reply"), vim.log.levels.ERROR)
           return
         end
-        notify("reply posted")
-        controller.refresh_discussions(tabnr)
+        notify(as_pending and "reply added to pending review" or "reply posted")
+        controller.refresh_discussions(ctx.tabnr)
       end)
     end,
   })

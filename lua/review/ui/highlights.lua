@@ -26,11 +26,14 @@ local SIGN_GROUP = "review_comment"
 local SIGN_COMMENT = "ReviewComment"
 local SIGN_UNRESOLVED = "ReviewUnresolved"
 local SIGN_RESOLVED = "ReviewResolved"
+local SIGN_PENDING = "ReviewPending"
 local AUGROUP = "ReviewSigns"
 
 M.ICON_COMMENT = "💬"
 M.ICON_UNRESOLVED = "❌"
 M.ICON_RESOLVED = "✅"
+-- A note of a review that is not submitted yet (review.util.pending).
+M.ICON_PENDING = "📝"
 
 ---Gutter anchors per session tabpage: { path, line, side, sign }[].
 ---@type table<integer, table[]>
@@ -46,11 +49,15 @@ local function ensure_signs()
   if not vim.fn.sign_getdefined(SIGN_RESOLVED)[1] then
     vim.fn.sign_define(SIGN_RESOLVED, { text = M.ICON_RESOLVED, texthl = "DiagnosticOk" })
   end
+  if not vim.fn.sign_getdefined(SIGN_PENDING)[1] then
+    vim.fn.sign_define(SIGN_PENDING, { text = M.ICON_PENDING, texthl = "DiagnosticWarn" })
+  end
 end
 
 ---Returns the icon for a discussion's state. Used by the panel and gutter.
 ---@param d table
 function M.icon_for(d)
+  if d.pending then return M.ICON_PENDING end
   if not discussion_util.is_resolvable(d) then
     return M.ICON_COMMENT
   end
@@ -61,6 +68,7 @@ function M.icon_for(d)
 end
 
 local function sign_for(d)
+  if d.pending then return SIGN_PENDING end
   if not discussion_util.is_resolvable(d) then return SIGN_COMMENT end
   if discussion_util.is_resolved(d) then return SIGN_RESOLVED end
   return SIGN_UNRESOLVED

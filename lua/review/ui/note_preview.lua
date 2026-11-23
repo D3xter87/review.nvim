@@ -135,6 +135,8 @@ local function render_thread(d, anchor, origin_buf, push)
 
   local head = string.format("%s %s:%d  @%s",
     highlights.icon_for(d), anchor.path, anchor.line, str(first.author) or "?")
+  -- Not submitted yet (review.util.pending): only its author sees it.
+  if first.pending then head = head .. "  " .. panel_hl.PENDING_TAG end
   local when = relative_date(first.created_at)
   if when then head = head .. "  · " .. when end
   push(head, "head")
@@ -152,6 +154,7 @@ local function render_thread(d, anchor, origin_buf, push)
       push("", "body")
       local rbody, rkinds = suggestion.render(n.body, pos, origin_fetcher(pos or {}, origin_buf))
       local author = str(n.author) or "?"
+      if n.pending then author = author .. " " .. panel_hl.PENDING_TAG end
       if #rbody == 0 then
         push(string.format("↳ @%s:", author), "reply")
       end
