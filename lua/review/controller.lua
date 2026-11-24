@@ -14,6 +14,8 @@
 --                              mode; else start a new session in `mode`.
 --   M.reopen_mr_session(opts)  reopen a closed MR + start session
 --   M.close(tabnr?)            tear down a session; defaults to active
+--   M.reload(tabnr, cb?)       rebuild a session from a fresh fetch (after a
+--                              rebase moved the MR's base/head)
 --   M.has_session()            does the current tab host a session?
 --   M.get_active_ctx()         { provider, remote, branch, mr, tabnr } | nil
 --   M.with_target(opts, cb)    resolve action target (active session,
@@ -387,8 +389,12 @@ end
 ---@param branch string
 ---@param full table
 ---@param initial_mode string|nil
-local function start_session(provider, remote, branch, full, initial_mode)
+---@param opts { quiet: boolean|nil, on_ready: fun(tabnr: integer)|nil }|nil
+---  quiet: skip the "!iid opened" notification (the caller reports instead);
+---  on_ready: called once the session is fully set up.
+local function start_session(provider, remote, branch, full, initial_mode, opts)
   initial_mode = initial_mode or "info"
+  opts = opts or {}
 
   diffview_int.open(full.mr, function(ok, err, repo)
     if not ok then
@@ -439,8 +445,11 @@ local function start_session(provider, remote, branch, full, initial_mode)
     highlights.refresh(full.discussions)
     require("review.ci").fetch(tabnr)
 
-    notify(string.format("!%s opened (%s -> %s)",
-      tostring(full.mr.iid), full.mr.source_branch or "?", full.mr.target_branch or "?"))
+    if not opts.quiet then
+      notify(string.format("!%s opened (%s -> %s)",
+        tostring(full.mr.iid), full.mr.source_branch or "?", full.mr.target_branch or "?"))
+    end
+    if opts.on_ready then opts.on_ready(tabnr) end
   end)
 end
 
@@ -724,9 +733,47 @@ function M.reopen_mr_session(opts)
   end)
 end
 
+---Rebuilds a session from a fresh fetch — what closing and reopening the review
+---does by hand. For changes an in-place refresh can't follow: a rebase moves
+---the MR's base and head, and with them the diff range the session's diffview
+---was opened on, the commits, and the positions new comments are anchored to.
+---
+---The old session is torn down only once the new payload has arrived, so a
+---failed fetch leaves it as it was. The panel mode carries over, and focus
+---returns to the tab the user was in unless that was the session itself.
+---@param tabnr integer
+---@param on_done fun(ok: boolean, err: string|nil)|nil
+function M.reload(tabnr, on_done)
+  on_done = on_done or function() end
+  local ctx = ctx_by_tab[tabnr]
+  if not ctx then return on_done(false, "no session in that tab") end
+  local session = state_mod.get_for_tab(tabnr)
+  local mode = session and session.panel.mode or "info"
+  local provider, remote, iid = ctx.provider, ctx.remote, ctx.mr.iid
+
+  provider.fetch_mr_full(remote, iid, function(full, err)
+    if not full then return on_done(false, err or "failed to load MR") end
+    -- The session may have been closed while the fetch was in flight.
+    if ctx_by_tab[tabnr] ~= ctx then return on_done(false, "session closed") end
+
+    local prev_tab = vim.api.nvim_get_current_tabpage()
+    M.close(tabnr, { quiet = true })
+    start_session(provider, remote, full.mr.source_branch or ctx.branch, full, mode, {
+      quiet = true,
+      on_ready = function()
+        if prev_tab ~= tabnr and vim.api.nvim_tabpage_is_valid(prev_tab) then
+          pcall(vim.api.nvim_set_current_tabpage, prev_tab)
+        end
+        on_done(true)
+      end,
+    })
+  end)
+end
+
 ---Tear down a session. `tabnr` defaults to the active session's tab.
 ---@param tabnr integer|nil
-function M.close(tabnr)
+---@param opts { quiet: boolean|nil }|nil  quiet: no "session closed" notification
+function M.close(tabnr, opts)
   tabnr = tabnr or (M.get_active_ctx() and M.get_active_ctx().tabnr)
   if not tabnr then return end
   local ctx = ctx_by_tab[tabnr]
@@ -768,6 +815,7 @@ function M.close(tabnr)
   -- notify plugins (noice, snacks) when emitted alongside a tab switch.
   -- Caller-emitted notifications (e.g. "!iid merged") render first; this
   -- one lands cleanly on the next event-loop tick.
+  if opts and opts.quiet then return end
   vim.schedule(function()
     notify_util.event("session closed (!" .. tostring(closed_iid) .. ")")
   end)

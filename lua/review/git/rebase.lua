@@ -223,6 +223,16 @@ function M.push(worktree, branch, cb)
   end)
 end
 
+---The commit HEAD points at in `cwd` (a worktree or the main repo).
+---@param cwd string
+---@param cb fun(sha: string|nil)
+function M.head_sha(cwd, cb)
+  M._run({ "git", "-C", cwd, "rev-parse", "HEAD" }, nil, nil, function(res)
+    local sha = res.ok and (res.stdout or ""):gsub("%s+$", "") or ""
+    cb(sha ~= "" and sha or nil)
+  end)
+end
+
 ---Removes the worktree directory; pcall'd because Windows occasionally
 ---holds locks on freshly-closed buffers' files.
 function M.cleanup(worktree, cb)

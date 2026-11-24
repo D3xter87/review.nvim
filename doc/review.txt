@@ -489,6 +489,14 @@ Close issue on merge                            ~
   Multiple parallel rebases on different branches of the same repo are
   supported (per-branch worktree paths, per-tab autocmd groups).
 
+  After a successful push, an open review of the MR is reloaded on the
+  rebased head -- the same as closing and reopening it, keeping the panel
+  mode -- so a follow-up `:ReviewMerge` sends the new head sha and the
+  diff, commits and comment anchors match the rewritten history. The
+  plugin waits (up to ~15 s) for the forge to report the pushed sha first,
+  since GitLab updates an MR's diff refs asynchronously; if it does not
+  catch up in time you get a warning and the review is left as it was.
+
 ------------------------------------------------------------------------------
                                                                   *:ReviewWeb*
 :ReviewWeb [{branch}|!{iid}]                    ~

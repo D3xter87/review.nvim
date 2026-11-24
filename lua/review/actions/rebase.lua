@@ -27,37 +27,94 @@ local notify_util = require("review.util.notify")
 
 local function notify(msg, level) notify_util.legacy(msg, level) end
 
+-- ---------------------------------------------------------- session sync
+
+-- How long to wait for the forge to pick up the push: GitLab recomputes an
+-- MR's diff_refs asynchronously, so for a moment after the push it still
+-- reports the pre-rebase head.
+local POLL_INTERVAL_MS = 1000
+local POLL_TRIES = 15
+
+---Brings an open review of the MR onto the rebased branch. Its snapshot still
+---holds the old base/head: :ReviewMerge would send a sha the forge rejects,
+---and the diff and comment anchors would describe history that no longer
+---exists. Waits until the forge reports `head` (the sha just pushed), then
+---rebuilds the session — what closing and reopening the review does by hand.
+---@param mr_ctx table  { provider, remote, mr } of the rebased MR
+---@param head string|nil  local HEAD after the rebase; nil = don't compare
+local function sync_session(mr_ctx, head)
+  local remote, iid = mr_ctx.remote, mr_ctx.mr.iid
+  local function session_tab()
+    return (controller.find_session_by_mr(remote.host,
+      remote.path or remote.owner_repo, iid))
+  end
+  if not session_tab() then return end
+
+  local tries = 0
+  local function poll()
+    tries = tries + 1
+    mr_ctx.provider.fetch_mr_details(remote, iid, function(mr)
+      local caught_up = mr ~= nil and (head == nil or mr.head_sha == head)
+      if not caught_up and tries < POLL_TRIES then
+        return vim.defer_fn(poll, POLL_INTERVAL_MS)
+      end
+      -- Looked up again: the user may have closed (or reopened) the review
+      -- while we waited.
+      local tabnr = session_tab()
+      if not tabnr then return end
+      if not caught_up then
+        notify(string.format(
+          "!%s: the forge still reports the pre-rebase head; close and reopen the review once it catches up",
+          tostring(iid)), vim.log.levels.WARN)
+        return
+      end
+      controller.reload(tabnr, function(ok, err)
+        if ok then
+          notify(string.format("!%s review reloaded on the rebased head", tostring(iid)))
+        else
+          notify(string.format("!%s: reloading the review failed: %s",
+            tostring(iid), err or "?"), vim.log.levels.WARN)
+        end
+      end)
+    end)
+  end
+  poll()
+end
+
 -- ---------------------------------------------------------- success / push
 
-local function finish_with_push(worktree, source, on_done)
+---Pushes the rebased branch from `cwd`, then syncs the open review of the MR.
+---`on_pushed` runs after the push whatever its outcome (worktree cleanup).
+---@param cwd string  worktree or main repo the rebase ran in
+---@param source string
+---@param mr_ctx table
+---@param on_pushed fun()|nil
+local function push_and_sync(cwd, source, mr_ctx, on_pushed)
   notify_util.progress(string.format("rebased %s, pushing (force-with-lease)...", source))
-  rebase.push(worktree, source, function(res)
-    if res.ok then
-      notify(string.format("!%s rebased & pushed", source))
-    else
-      notify(string.format(
-        "%s rebased locally; push failed: %s (run `git push --force-with-lease` manually)",
-        source, res.error or "?"), vim.log.levels.WARN)
-    end
-    rebase.cleanup(worktree, function()
-      if on_done then on_done() end
+  -- Read before the push: the worktree goes away right after it.
+  rebase.head_sha(cwd, function(head)
+    rebase.push(cwd, source, function(res)
+      if res.ok then
+        notify(string.format("!%s rebased & pushed", source))
+      else
+        notify(string.format(
+          "%s rebased locally; push failed: %s (run `git push --force-with-lease` manually)",
+          source, res.error or "?"), vim.log.levels.WARN)
+      end
+      if on_pushed then on_pushed() end
+      if res.ok then sync_session(mr_ctx, head) end
     end)
   end)
 end
 
+local function finish_with_push(worktree, source, mr_ctx)
+  push_and_sync(worktree, source, mr_ctx, function() rebase.cleanup(worktree) end)
+end
+
 -- In-place variant: branch already current; no worktree to clean up. Push
 -- runs in the main repo's cwd.
-local function finish_in_place_with_push(repo_root, source)
-  notify_util.progress(string.format("rebased %s, pushing (force-with-lease)...", source))
-  rebase.push(repo_root, source, function(res)
-    if res.ok then
-      notify(string.format("!%s rebased & pushed", source))
-    else
-      notify(string.format(
-        "%s rebased locally; push failed: %s (run `git push --force-with-lease` manually)",
-        source, res.error or "?"), vim.log.levels.WARN)
-    end
-  end)
+local function finish_in_place_with_push(repo_root, source, mr_ctx)
+  push_and_sync(repo_root, source, mr_ctx)
 end
 
 -- ---------------------------------------------------------- conflict tab
@@ -66,7 +123,7 @@ end
 -- other (a "continue" that lands in another conflict re-opens the tab).
 local open_conflict_tab
 
-local function on_tab_closed(worktree, source, target)
+local function on_tab_closed(worktree, source, target, mr_ctx)
   rebase.check_state(worktree, function(state)
     if state.unmerged then
       -- User closed without resolving everything -> abort.
@@ -82,7 +139,7 @@ local function on_tab_closed(worktree, source, target)
       if res.conflict then
         -- Another batch of conflicts surfaced — re-open a fresh tab.
         notify("more conflicts after continue — opening conflict view")
-        open_conflict_tab(worktree, source, target)
+        open_conflict_tab(worktree, source, target, mr_ctx)
         return
       end
       if not res.ok then
@@ -91,14 +148,14 @@ local function on_tab_closed(worktree, source, target)
         rebase.abort(worktree, function() rebase.cleanup(worktree) end)
         return
       end
-      finish_with_push(worktree, source)
+      finish_with_push(worktree, source, mr_ctx)
     end)
   end)
 end
 
 -- Per-tab augroup so multiple parallel rebases (different branches) don't
 -- step on each other's TabClosed handlers.
-local function watch_tab(tabnr, worktree, source, target)
+local function watch_tab(tabnr, worktree, source, target, mr_ctx)
   local group = vim.api.nvim_create_augroup("ReviewRebaseTab_" .. tostring(tabnr), { clear = true })
   vim.api.nvim_create_autocmd("TabClosed", {
     group = group,
@@ -107,12 +164,12 @@ local function watch_tab(tabnr, worktree, source, target)
       -- gone (compare against handle, not tabnr-position which can shift).
       if vim.api.nvim_tabpage_is_valid(tabnr) then return end
       pcall(vim.api.nvim_del_augroup_by_name, "ReviewRebaseTab_" .. tostring(tabnr))
-      on_tab_closed(worktree, source, target)
+      on_tab_closed(worktree, source, target, mr_ctx)
     end,
   })
 end
 
-open_conflict_tab = function(worktree, source, target)
+open_conflict_tab = function(worktree, source, target, mr_ctx)
   vim.cmd("tabnew")
   local tabnr = vim.api.nvim_get_current_tabpage()
   -- Tab-local cwd so user's other tabs aren't affected. fnameescape handles
@@ -129,7 +186,7 @@ open_conflict_tab = function(worktree, source, target)
   notify(string.format(
     "rebase conflict on %s. Resolve, stage, then close this tab to continue (or close with conflicts to abort).",
     source))
-  watch_tab(tabnr, worktree, source, target)
+  watch_tab(tabnr, worktree, source, target, mr_ctx)
 end
 
 -- ---------------------------------------------------------- entry point
@@ -157,7 +214,7 @@ function M.run(target_opts)
       notify(string.format(
         "%s is the current branch — running in-place rebase on %s", source, target))
       rebase.start_in_place(repo_root, target, function(res)
-        if res.ok then return finish_in_place_with_push(repo_root, source) end
+        if res.ok then return finish_in_place_with_push(repo_root, source, target_ctx) end
         if res.conflict then
           notify("rebase conflict — resolve via your usual diff tools, then run "
               .. "`git rebase --continue` or `git rebase --abort`",
@@ -180,8 +237,8 @@ function M.run(target_opts)
 
     notify_util.progress(string.format("rebasing %s on %s (worktree)...", source, target))
     rebase.start(repo_root, source, target, function(res)
-      if res.ok then return finish_with_push(res.worktree, source) end
-      if res.conflict then return open_conflict_tab(res.worktree, source, target) end
+      if res.ok then return finish_with_push(res.worktree, source, target_ctx) end
+      if res.conflict then return open_conflict_tab(res.worktree, source, target, target_ctx) end
       if res.branch_busy then
         -- Edge case: branch checked out in some OTHER worktree (not our
         -- current branch). Worktree add can't proceed; bail.
