@@ -61,6 +61,15 @@ with feature parity.
   merge** checkboxes and **Merge now / Set auto-merge** actions. The commit
   title and description are separate options, each opening its own input
   the moment it is ticked.
+- `:ReviewCreate [target]` opens an MR/PR from the checked-out branch in a
+  dialog: **Target / Title / Description / Draft** (plus **Delete source
+  branch / Squash** on GitLab). The target defaults to the branch yours
+  came from — read from the reflog, else the nearest branch on origin —
+  and `<CR>` on it picks another. The branch must be pushed already; the
+  plugin never pushes. The new link goes to the clipboard.
+- `:ReviewClose` takes an optional farewell comment and can **delete the
+  source branch** on the remote along with the close (not offered for
+  forks or default / protected branches).
 - **Close issue on merge** writes a closing line per issue (`Closes
   PROJ-123`, `Closes #12`) into the MR/PR description right before merging,
   so the merge closes the issue too — on GitLab and GitHub alike. The issue
@@ -108,7 +117,10 @@ s                          " add a suggestion (input pre-filled with code)
 " actions on the active MR
 :ReviewApprove             " approve
 :ReviewMerge               " open merge dialog
-:ReviewClose               " close MR (with optional farewell comment)
+:ReviewClose               " close MR (optional farewell comment, delete branch)
+
+" open an MR/PR from the checked-out branch (pushed already)
+:ReviewCreate              " target = the branch it came from; :ReviewCreate main to pick
 
 " out-of-band actions on a different MR — session stays open
 :ReviewApprove !319
@@ -131,7 +143,7 @@ tab.
     "ReviewApprove", "ReviewRevoke",
     "ReviewStart", "ReviewSubmit", "ReviewDiscard",
     "ReviewInfo", "ReviewCommits", "ReviewNotes",
-    "ReviewMerge", "ReviewClose", "ReviewTime",
+    "ReviewMerge", "ReviewCreate", "ReviewClose", "ReviewTime",
   },
   opts = {},
 }
@@ -287,7 +299,8 @@ shortcuts for "open this MR with that panel up front":
 | `:ReviewWeb`     | Open MR/PR in the default browser (works for any state). |
 | `:ReviewRequest` | List open MRs/PRs where you're a requested reviewer, then open one. |
 | `:ReviewMine`    | List your own open MRs/PRs (assignee or author), then open one. |
-| `:ReviewClose`   | Close MR with an optional farewell comment.              |
+| `:ReviewCreate`  | Open an MR/PR from the checked-out branch; target defaults to the branch it came from, `:ReviewCreate <target>` overrides. Never pushes. |
+| `:ReviewClose`   | Close MR with an optional farewell comment; optionally delete its source branch on the remote. |
 | `:ReviewTime`    | Spent time. Sign picks the op: `1h` sets, `+1h` adds, `-1h` subtracts, `0` clears. No arg → prompt prefilled with the current total. GitLab only. |
 | `:ReviewInfo`    | Bottom panel — MR metadata, editable sections.           |
 | `:ReviewCommits` | Bottom panel — commits with diff stats, author and date; `<CR>` opens commit diff, `K` shows the full message. |

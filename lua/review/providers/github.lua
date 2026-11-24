@@ -1331,12 +1331,20 @@ end
 function M.fetch_branches(remote, cb)
   fetch_paginated(repo_url(remote, "/branches"), nil, remote.headers, function(list, err)
     if not list then return cb(nil, err) end
-    local out = {}
-    for _, b in ipairs(list) do
-      local name = nullable(b.name)
-      if name then table.insert(out, { name = name }) end
-    end
-    cb(out)
+    -- /branches does not say which one is the default; the repository does.
+    -- Without it the list is still usable, just with no branch marked.
+    client.request({ url = repo_url(remote), method = "get", headers = remote.headers }, function(res)
+      local repo = res.ok and client.decode_json(res.body) or nil
+      local default = repo and nullable(repo.default_branch)
+      local out = {}
+      for _, b in ipairs(list) do
+        local name = nullable(b.name)
+        if name then
+          table.insert(out, { name = name, default = name == default, protected = b.protected == true })
+        end
+      end
+      cb(out)
+    end)
   end)
 end
 
@@ -1717,6 +1725,10 @@ end
 
 -- ------------------------------------------------------- merge / close
 
+---Deletes a branch of the repository (the remote one, not a local branch).
+---@param remote table
+---@param branch string
+---@param cb fun(ok: boolean, err: string|nil)
 local function delete_branch(remote, branch, cb)
   client.request({
     url = repo_url(remote, "/git/refs/heads/" .. branch),
@@ -1724,9 +1736,10 @@ local function delete_branch(remote, branch, cb)
     headers = remote.headers,
   }, function(res)
     if res.ok then return cb(true) end
-    cb(false, res.err or "failed to delete branch")
+    cb(false, gh_error(res))
   end)
 end
+M.delete_branch = delete_branch
 
 ---Merge a PR (or schedule auto-merge). `opts` is the same table the GitLab
 ---provider takes; GitHub accepts the commit title and description
@@ -1803,6 +1816,37 @@ end
 
 function M.reopen_mr(remote, n, cb)
   M.update_mr(remote, n, { state_event = "reopen" }, cb)
+end
+
+---Options the :ReviewCreate dialog may offer on this forge. GitHub sets
+---"delete branch on merge" and the squash method per repository or at merge
+---time, not on a new PR, so the dialog leaves both out.
+M.create_fields = {}
+
+---Opens a new PR. `f` is the same table the GitLab provider takes; the
+---GitLab-only fields are ignored.
+---@param remote table
+---@param f { source_branch: string, target_branch: string, title: string,
+---  description: string|nil, draft: boolean|nil }
+---@param cb fun(ok: boolean, err: string|nil, mr: table|nil)
+function M.create_mr(remote, f, cb)
+  client.request({
+    url = pr_no_n_url(remote),
+    method = "post",
+    headers = remote.headers,
+    body = vim.json.encode({
+      title = f.title,
+      head = f.source_branch,
+      base = f.target_branch,
+      body = f.description or "",
+      draft = f.draft == true,
+    }),
+  }, function(res)
+    if not res.ok then return cb(false, gh_error(res)) end
+    local raw = client.decode_json(res.body)
+    if not raw then return cb(false, "failed to decode the new PR") end
+    cb(true, nil, normalize_pr(raw))
+  end)
 end
 
 -- ------------------------------------------------ position + suggestion

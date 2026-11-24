@@ -694,6 +694,54 @@ function M.reopen_mr(remote, iid, cb)
   M.update_mr(remote, iid, { state_event = "reopen" }, cb)
 end
 
+---Options the :ReviewCreate dialog may offer on this forge.
+M.create_fields = { delete_source = true, squash = true }
+
+---Opens a new MR. Draft is encoded GitLab-style, as a "Draft: " title prefix.
+---@param remote table
+---@param f { source_branch: string, target_branch: string, title: string,
+---  description: string|nil, draft: boolean|nil, delete_source: boolean|nil, squash: boolean|nil }
+---@param cb fun(ok: boolean, err: string|nil, mr: table|nil)
+function M.create_mr(remote, f, cb)
+  local title = f.title
+  if f.draft and not title:match("^[Dd]raft:%s") then title = "Draft: " .. title end
+  client.request({
+    url = string.format("%s/projects/%s/merge_requests", remote.base_url, remote.project_id),
+    method = "post",
+    headers = remote.headers,
+    body = vim.json.encode({
+      source_branch = f.source_branch,
+      target_branch = f.target_branch,
+      title = title,
+      description = f.description or "",
+      remove_source_branch = f.delete_source == true,
+      squash = f.squash == true,
+    }),
+  }, function(res)
+    -- The 409 "Another open merge request already exists" lives in the body.
+    if not res.ok then return cb(false, gl_error_detail(res) or res.err or "failed to create MR") end
+    local raw, derr = client.decode_json(res.body)
+    if not raw then return cb(false, derr) end
+    cb(true, nil, normalize_mr(raw))
+  end)
+end
+
+---Deletes a branch of the project (the repository branch, not a local one).
+---@param remote table
+---@param branch string
+---@param cb fun(ok: boolean, err: string|nil)
+function M.delete_branch(remote, branch, cb)
+  client.request({
+    url = string.format("%s/projects/%s/repository/branches/%s",
+      remote.base_url, remote.project_id, client.uri_encode(branch)),
+    method = "delete",
+    headers = remote.headers,
+  }, function(res)
+    if res.ok then return cb(true) end
+    cb(false, gl_error_detail(res) or res.err or "failed to delete branch")
+  end)
+end
+
 ---Merge an MR (or schedule auto-merge).
 ---@param remote table
 ---@param iid string|number
@@ -979,7 +1027,9 @@ function M.fetch_branches(remote, cb)
     local out = {}
     for _, b in ipairs(list) do
       local name = nullable(b.name)
-      if name then table.insert(out, { name = name, default = b.default == true }) end
+      if name then
+        table.insert(out, { name = name, default = b.default == true, protected = b.protected == true })
+      end
     end
     cb(out)
   end)

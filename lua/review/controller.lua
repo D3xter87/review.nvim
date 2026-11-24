@@ -469,6 +469,10 @@ local function build_provider_context(cb)
   cb(provider, remote, nil)
 end
 
+---Provider and remote for the repository of the cwd, with no MR involved —
+---for actions that have none yet (:ReviewCreate).
+M.provider_context = build_provider_context
+
 local function resolve_branch(opts)
   local branch = opts.branch
   if branch and branch ~= "" then

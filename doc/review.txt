@@ -22,6 +22,7 @@ CONTENTS                                                     *review-contents*
        :ReviewRebase .................................... |:ReviewRebase|
        :ReviewWeb ....................................... |:ReviewWeb|
        :ReviewRequest / :ReviewMine ..................... |:ReviewRequest|
+       :ReviewCreate .................................... |:ReviewCreate|
        :ReviewClose ..................................... |:ReviewClose|
        :ReviewTime ...................................... |:ReviewTime|
        Spent-time refs trailer .......................... |review-refs-line|
@@ -86,7 +87,7 @@ With `lazy.nvim`: >lua
         "ReviewApprove", "ReviewRevoke",
         "ReviewStart", "ReviewSubmit", "ReviewDiscard",
         "ReviewInfo", "ReviewCommits", "ReviewNotes",
-        "ReviewMerge", "ReviewRebase", "ReviewClose",
+        "ReviewMerge", "ReviewRebase", "ReviewCreate", "ReviewClose",
       },
       opts = {
         -- see |review-config|
@@ -549,11 +550,82 @@ Close issue on merge                            ~
                (request) / `assignee:@me` + `author:@me` merged (mine).
 
 ------------------------------------------------------------------------------
+                                                               *:ReviewCreate*
+:ReviewCreate [{target}]                        ~
+
+  Open a new MR/PR from the checked-out branch into {target}.
+
+  The branch has to be on origin already, with nothing left to push. The
+  plugin never pushes -- it stops and says what to run instead
+  (`git push -u origin <branch>` / `git push`). The check reads the local
+  `origin/<branch>`, so it is as fresh as your last fetch or push.
+
+  Without {target} the target is the branch the current one came from,
+  read from local git data only (no fetch):
+
+    1. The branch's reflog -- `Created from origin/develop`, when the
+       start point was given (`git checkout -b feature/foo origin/develop`).
+    2. When step 1 reads `Created from HEAD` (`git switch -c feature/foo`):
+       HEAD's reflog -- the branch you were on at the time.
+    3. The nearest branch on origin: the one missing the fewest commits of
+       HEAD (needs git 2.41+). Branches holding all of HEAD (built on top
+       of yours) are skipped. A tie goes to the default branch, then to a
+       protected one, then to the one with fewer commits of its own.
+    4. The default branch.
+
+  Only branches the forge lists count -- the first 500 on GitLab, 1000 on
+  GitHub. A {target} past that is still accepted when `origin/{target}`
+  exists locally. Steps 1 and 2 forget with the reflog (`git gc` expires
+  it after 90 days, a fresh clone has none).
+
+  A dialog follows: >
+
+    Source: feature/foo
+
+      Target:       develop  (base)
+      Title:        Add foo
+      Description:  (none)
+      [ ] Draft
+      [x] Delete source branch after merge
+      [ ] Squash commits on merge
+
+      ▶ Create MR
+<
+  <CR> on Target opens a |vim.ui.select| picker of the remote branches:
+  the detected base first, then the default branch, then the rest. <CR> on
+  Title / Description opens an input; a branch with one commit prefills
+  both from that commit, more commits give a title made of the branch name.
+  <Space> / <CR> toggles a checkbox. The title is required.
+
+  "Delete source branch after merge" and "Squash commits on merge" are
+  GitLab-only: GitHub sets both per repository or at merge time, so a PR
+  dialog leaves them out. Draft is the `Draft:` title prefix on GitLab and
+  a draft PR on GitHub.
+
+  An open MR from the same branch into the same target is refused before
+  anything is sent. On success the notification carries the link, which
+  also lands in the unnamed and `+` registers. No review session is
+  started -- run |:Review| for that.
+
+------------------------------------------------------------------------------
                                                                 *:ReviewClose*
 :ReviewClose [{branch}|!{iid}]                  ~
 
-  Close the MR. Opens an input prompt -- any non-empty body is posted as a
-  global discussion before the close call; an empty body closes silently.
+  Close the MR. Opens a dialog with the cursor on the Close action, so
+  <CR> closes right away: >
+
+    feature/foo -> develop
+
+      Comment:  (none - close silently)
+      [ ] Delete source branch origin/feature/foo
+
+      ▶ Close
+<
+  A non-empty Comment is posted as a global discussion before the close
+  call. "Delete source branch" deletes the source branch on the remote
+  after the MR is closed -- never your local branch. It is not offered for
+  an MR/PR from a fork, nor when the source is the default or a protected
+  branch. If the delete fails, the MR stays closed and you get a warning.
 
   Like `:ReviewMerge`, when the target is the active session the local
   session is also torn down.
