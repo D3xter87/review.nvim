@@ -72,6 +72,40 @@ local function fire_on_merged(ctx, refs, merged)
   end
 end
 
+---Once a merge has landed (right away, or when auto-merge completes): if the
+---merged branch is STILL the one checked out locally, moves to the branch it
+---was merged into and fast-forwards that to origin, so the merge is there
+---locally too — the source branch is finished (and often deleted on the
+---forge). Any other checkout is left alone: for an auto-merge the user may
+---well have moved on by the time it lands. See `merge.checkout_target`.
+---@param mr table
+local function checkout_target(mr)
+  if (require("review.config").get().merge or {}).checkout_target == false then return end
+  local git = require("review.git.rebase")
+  local source, target = mr.source_branch, mr.target_branch
+  if not source or not target or source == target then return end
+  if git.current_branch() ~= source then return end
+  local root = git.repo_root()
+  if not root then return end
+  git.checkout(root, target, function(res)
+    if not res.ok then
+      notify(string.format("could not check out %s after the merge: %s",
+        target, res.error or "?"), vim.log.levels.WARN)
+      return
+    end
+    git.fast_forward(root, target, function(fres)
+      if fres.ok then
+        notify(string.format("checked out %s, up to date with origin (%s is merged)",
+          target, source))
+      else
+        notify(string.format(
+          "checked out %s (%s is merged), but could not fast-forward it to origin/%s: %s",
+          target, source, target, fres.error or "?"), vim.log.levels.WARN)
+      end
+    end)
+  end)
+end
+
 -- Maps GitLab's detailed_merge_status to a one-liner the user can act on.
 local function blocked_reason(mr)
   local d = mr.detailed_merge_status
@@ -169,6 +203,7 @@ function M.run(target_opts)
               auto_merge_watcher.watch(target_ctx, {
                 on_merged = function(merged)
                   fire_on_merged(target_ctx, choices.close_issues or {}, merged)
+                  checkout_target(mr)
                 end,
               })
               -- Refresh details only when targeting the active session so the
@@ -189,6 +224,7 @@ function M.run(target_opts)
               if not is_ephemeral then
                 controller.close()
               end
+              checkout_target(mr)
             end
           end)
         end

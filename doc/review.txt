@@ -346,6 +346,19 @@ All action commands accept `[branch|!iid]` as an argument unless noted.
   session, the local session (diffview tab + bottom panel) is torn down.
   Out-of-band merges leave any active session intact.
 
+  Once the merge has landed -- right after "Merge now", or when the
+  auto-merge watcher sees it complete -- and the merged branch is STILL
+  the one you have checked out locally, the plugin checks out the branch
+  it was merged into (`git checkout <target>`; a target that exists only
+  on origin gets a local tracking branch) and fast-forwards it to
+  `origin/<target>`, so the merge is there locally too. Any other
+  checkout is left alone (for an auto-merge you may have moved on by the
+  time it lands). Uncommitted changes are carried over or, if they clash,
+  make git refuse -- you get a warning and stay where you were. If the
+  local target has commits origin doesn't, the fast-forward is skipped
+  with a warning; nothing is merged or dropped. Turn it all off with
+  `merge = { checkout_target = false }`.
+
   Auto-merge starts a background watcher (see |review-auto-merge|) that
   notifies you when the merge eventually lands or the pipeline fails.
 
@@ -1232,6 +1245,13 @@ Defaults: >lua
       enabled          = true,
       poll_interval_ms = 30 * 1000,
       timeout_ms       = 60 * 60 * 1000,
+    },
+
+    -- Once a :ReviewMerge merge lands (now or via auto-merge) and the
+    -- merged branch is still checked out locally: check out the target
+    -- branch and fast-forward it to origin. See |:ReviewMerge|.
+    merge = {
+      checkout_target = true,
     },
 
     -- Mirror the MR's total spent time into a "refs <BRANCH> #time <total>"

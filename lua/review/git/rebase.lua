@@ -223,6 +223,39 @@ function M.push(worktree, branch, lease, cb)
   end)
 end
 
+---`git checkout <branch>` in `cwd`. A branch that only exists on origin gets
+---a local tracking branch (git's own DWIM). Uncommitted changes are carried
+---over when they don't clash, otherwise git refuses and nothing changes.
+---@param cwd string
+---@param branch string
+---@param cb fun(res: { ok: boolean, error: string|nil })
+function M.checkout(cwd, branch, cb)
+  M._run({ "git", "-C", cwd, "checkout", branch }, nil, nil, function(res)
+    if res.ok then return cb({ ok = true }) end
+    cb({ ok = false, error = (res.stderr or ""):gsub("%s+$", "") })
+  end)
+end
+
+---Brings the checked-out `branch` up to `origin/<branch>`: fetches it, then
+---fast-forwards. Fails (and changes nothing) when the local branch has
+---commits origin doesn't — those are the user's to sort out, never merged
+---or dropped here.
+---@param cwd string
+---@param branch string
+---@param cb fun(res: { ok: boolean, error: string|nil })
+function M.fast_forward(cwd, branch, cb)
+  local spec = "+refs/heads/" .. branch .. ":refs/remotes/origin/" .. branch
+  M._run({ "git", "-C", cwd, "fetch", "origin", spec }, nil, nil, function(fres)
+    if not fres.ok then
+      return cb({ ok = false, error = "git fetch failed: " .. (fres.stderr or ""):gsub("%s+$", "") })
+    end
+    M._run({ "git", "-C", cwd, "merge", "--ff-only", "origin/" .. branch }, nil, nil, function(res)
+      if res.ok then return cb({ ok = true }) end
+      cb({ ok = false, error = (res.stderr or ""):gsub("%s+$", "") })
+    end)
+  end)
+end
+
 ---The commit HEAD points at in `cwd` (a worktree or the main repo).
 ---@param cwd string
 ---@param cb fun(sha: string|nil)

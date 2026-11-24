@@ -221,6 +221,13 @@ require("review").setup({
     timeout_ms       = 60 * 60 * 1000,    -- 1 hour
   },
 
+  -- Once a merge lands (now or via auto-merge): if the merged branch is
+  -- still checked out locally, switch to the branch it was merged into and
+  -- fast-forward it to origin. false = stay.
+  merge = {
+    checkout_target = true,
+  },
+
   -- Mirror the total spent time into a "refs <BRANCH> #time <total>"
   -- trailer at the bottom of the MR description. Off by default.
   spent_time_refs_line = {

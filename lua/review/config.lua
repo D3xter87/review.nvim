@@ -71,6 +71,15 @@ local defaults = {
     timeout_ms       = 60 * 60 * 1000,  -- give up after 1 h
   },
 
+  -- :ReviewMerge, once the merge lands ("Merge now", or auto-merge completing
+  -- while the watcher runs). When the merged MR/PR's source branch is still
+  -- the one checked out locally, `checkout_target` switches to its target
+  -- branch and fast-forwards it to origin, so you aren't left on a finished
+  -- branch. false = stay where you are.
+  merge = {
+    checkout_target = true,
+  },
+
   -- Mirror the MR's total spent time into a trailer line at the very bottom of
   -- the description: "refs PROJ-123-FEAT #time 1h 30m" — the source branch
   -- uppercased, plus the current total. Rewritten after every :ReviewTime /
