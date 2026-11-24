@@ -4,6 +4,9 @@
 --
 -- Conventions:
 --   * `cb({ ok = bool, code = int, stdout = str, stderr = str, ... })`
+--   * Only origin's branches take part: the rebase starts from
+--     `origin/<source>`, goes onto `origin/<target>` and is pushed back to
+--     `origin/<source>`. Local branches are never read nor moved.
 --   * Worktrees live at `<repo>/.git/review-rebase/<sanitized_branch>` so
 --     parallel rebases of different branches coexist; the path is fixed
 --     per source branch (so a re-run after a crash finds the previous one).
@@ -83,34 +86,44 @@ function M.check_state(worktree, cb)
         end
       end
     end
-    local in_progress = vim.fn.isdirectory(worktree .. "/.git/rebase-merge") == 1
-        or vim.fn.isdirectory(worktree .. "/.git/rebase-apply") == 1
-    cb({ unmerged = unmerged, in_progress = in_progress })
+    -- The rebase state lives in the worktree's own git dir, which for a
+    -- linked worktree is `<repo>/.git/worktrees/<name>` — its `.git` is a
+    -- file pointing there, not a directory.
+    M._run({ "git", "-C", worktree, "rev-parse", "--absolute-git-dir" }, nil, nil, function(gres)
+      local git_dir = gres.ok and (gres.stdout or ""):gsub("%s+$", "") or ""
+      local in_progress = git_dir ~= ""
+          and (vim.fn.isdirectory(git_dir .. "/rebase-merge") == 1
+            or vim.fn.isdirectory(git_dir .. "/rebase-apply") == 1)
+      cb({ unmerged = unmerged, in_progress = in_progress })
+    end)
   end)
 end
 
----Starts the rebase. Three-step sequence; cb fires once on completion.
----Successful path: cb({ ok = true, worktree = ... }).
----Conflict path:    cb({ ok = false, conflict = true, worktree = ... }).
+---Starts the rebase, working only on origin's branches: the worktree is a
+---detached checkout of the freshly fetched `origin/<source>`, rebased onto
+---`origin/<target>`. Local branches — stale or checked out — never take part.
+---Four steps; cb fires once on completion.
+---Successful path: cb({ ok = true, worktree = ..., lease = ... }).
+---Conflict path:    cb({ ok = false, conflict = true, worktree = ..., lease = ... }).
 ---Other failures:   cb({ ok = false, error = "..." })  (worktree may or may
 ---                  not exist depending on which step failed; caller handles).
+---`lease` is the sha `origin/<source>` had when the rebase started; M.push
+---only overwrites the branch if it still points there.
 ---@param repo_root string
 ---@param source_branch string
 ---@param target_branch string
----@param cb fun(res: { ok: boolean, conflict: boolean|nil, worktree: string|nil, error: string|nil, branch_busy: boolean|nil })
+---@param cb fun(res: { ok: boolean, conflict: boolean|nil, worktree: string|nil, lease: string|nil, error: string|nil })
 function M.start(repo_root, source_branch, target_branch, cb)
   local worktree = M.worktree_path(repo_root, source_branch)
+  local lease
 
   local function do_rebase()
-    -- `origin/<target>` to use the freshest fetched ref; falls back implicitly
-    -- to the local target if origin/<target> doesn't exist (rare, e.g. when
-    -- target branch hasn't been pushed). For simplicity we always fetch first.
     M._run({ "git", "-C", worktree, "rebase", "origin/" .. target_branch }, nil, nil, function(res)
-      if res.ok then return cb({ ok = true, worktree = worktree }) end
+      if res.ok then return cb({ ok = true, worktree = worktree, lease = lease }) end
       -- Distinguish conflict vs other failure by checking state.
       M.check_state(worktree, function(state)
         if state.in_progress and state.unmerged then
-          return cb({ ok = false, conflict = true, worktree = worktree })
+          return cb({ ok = false, conflict = true, worktree = worktree, lease = lease })
         end
         cb({
           ok = false,
@@ -121,25 +134,34 @@ function M.start(repo_root, source_branch, target_branch, cb)
     end)
   end
 
-  local function do_worktree_add()
-    M._run({ "git", "-C", repo_root, "worktree", "add", worktree, source_branch },
-      nil, nil, function(res)
-      if res.ok then return do_rebase() end
-      -- "is already checked out" or "is already used by worktree" -> branch_busy
-      local stderr = res.stderr or ""
-      if stderr:find("already checked out") or stderr:find("already used by") then
-        return cb({
-          ok = false,
-          branch_busy = true,
-          error = "branch '" .. source_branch .. "' is already checked out",
-        })
+  local function do_read_lease()
+    M.head_sha(worktree, function(sha)
+      if not sha then
+        return cb({ ok = false, worktree = worktree,
+          error = "cannot read origin/" .. source_branch .. " in the worktree" })
       end
-      cb({ ok = false, error = "worktree add failed: " .. stderr:gsub("%s+$", "") })
+      lease = sha
+      do_rebase()
+    end)
+  end
+
+  local function do_worktree_add()
+    -- --detach: a branch can be checked out in only one worktree, and we
+    -- don't want a local branch anyway — the result is pushed straight to
+    -- origin.
+    M._run({ "git", "-C", repo_root, "worktree", "add", "--detach", worktree,
+      "origin/" .. source_branch }, nil, nil, function(res)
+      if res.ok then return do_read_lease() end
+      cb({ ok = false, error = "worktree add failed: " .. (res.stderr or ""):gsub("%s+$", "") })
     end)
   end
 
   local function do_fetch()
-    M._run({ "git", "-C", repo_root, "fetch", "origin", source_branch, target_branch },
+    -- Explicit refspecs: the remote-tracking refs are what the rebase starts
+    -- from and lands on, so they must be updated whatever the remote's fetch
+    -- config says.
+    local function spec(b) return "+refs/heads/" .. b .. ":refs/remotes/origin/" .. b end
+    M._run({ "git", "-C", repo_root, "fetch", "origin", spec(source_branch), spec(target_branch) },
       nil, nil, function(res)
       -- Fetch must succeed: the whole point of rebase is to put the branch
       -- on top of the LATEST origin/<target>. If we couldn't refresh remote
@@ -157,33 +179,6 @@ function M.start(repo_root, source_branch, target_branch, cb)
   end
 
   do_fetch()
-end
-
----In-place rebase variant: runs in `cwd` (the user's main repo) rather than
----a worktree. Used when source_branch == current branch — the user is
----already on it and a worktree would just be redundant indirection.
----@param cwd string
----@param target_branch string
----@param cb fun(res: { ok: boolean, conflict: boolean|nil, error: string|nil })
-function M.start_in_place(cwd, target_branch, cb)
-  M._run({ "git", "-C", cwd, "fetch", "origin", target_branch }, nil, nil, function(fres)
-    if not fres.ok then
-      return cb({
-        ok = false,
-        error = "git fetch failed: " .. ((fres.stderr or "(no stderr)"):gsub("%s+$", ""))
-            .. " - check your network / VPN and retry",
-      })
-    end
-    M._run({ "git", "-C", cwd, "rebase", "origin/" .. target_branch }, nil, nil, function(res)
-      if res.ok then return cb({ ok = true }) end
-      M.check_state(cwd, function(state)
-        if state.in_progress and state.unmerged then
-          return cb({ ok = false, conflict = true })
-        end
-        cb({ ok = false, error = "rebase failed: " .. ((res.stderr or ""):gsub("%s+$", "")) })
-      end)
-    end)
-  end)
 end
 
 ---Resume a rebase after the user has staged their conflict resolution. Runs
@@ -211,12 +206,17 @@ function M.abort(worktree, cb)
   end)
 end
 
----Force-with-lease push of the rebased branch.
+---Pushes the worktree's HEAD to `origin/<branch>`, replacing it only if it
+---still points at `lease` (where the rebase started) — commits someone pushed
+---in the meantime make the push fail instead of being dropped.
 ---@param worktree string
 ---@param branch string
+---@param lease string
 ---@param cb fun(res: { ok: boolean, error: string|nil })
-function M.push(worktree, branch, cb)
-  M._run({ "git", "-C", worktree, "push", "--force-with-lease", "origin", branch },
+function M.push(worktree, branch, lease, cb)
+  local ref = "refs/heads/" .. branch
+  M._run({ "git", "-C", worktree, "push",
+    "--force-with-lease=" .. ref .. ":" .. lease, "origin", "HEAD:" .. ref },
     nil, nil, function(res)
     if res.ok then return cb({ ok = true }) end
     cb({ ok = false, error = (res.stderr or ""):gsub("%s+$", "") })

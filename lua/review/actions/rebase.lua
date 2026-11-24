@@ -1,9 +1,14 @@
 -- :ReviewRebase [branch|!iid]
 --
--- Rebases the MR's source branch onto its target without disturbing the
--- user's currently-checked-out branch. The rebase runs in a dedicated git
--- worktree at `<repo>/.git/review-rebase/<sanitized_source>`; on success we
--- push the rewritten history with `--force-with-lease` and clean up.
+-- Rebases the MR's source branch onto its target on origin, without touching
+-- any local branch: the rebase starts from `origin/<source>`, goes onto
+-- `origin/<target>` and the result is pushed back to `origin/<source>`. It
+-- runs in a dedicated detached git worktree at
+-- `<repo>/.git/review-rebase/<sanitized_source>`, so it doesn't matter which
+-- branch the user has checked out (the source branch itself included), nor
+-- whether their local copy of it is stale. The push is a force-with-lease
+-- against the sha the rebase started from: anything pushed to the branch in
+-- the meantime makes it fail rather than be overwritten.
 --
 -- On conflict we open a brand-new tab, set `:tcd` to the worktree, and
 -- launch `:DiffviewOpen` (which auto-detects the merge state). The user
@@ -14,10 +19,7 @@
 --     (more conflicts re-open another tab; final success pushes & cleans up)
 --   * tab closed with unmerged paths    -> `git rebase --abort` + cleanup
 --
--- Special case: when `source_branch == current branch`, a worktree would
--- conflict ("branch is already checked out"). We fall back to in-place
--- rebase in the main repo (the user is already on it, so "no branch
--- change" is moot).
+-- After the push, an open review of the MR is reloaded on the new head.
 
 local M = {}
 
@@ -41,7 +43,7 @@ local POLL_TRIES = 15
 ---exists. Waits until the forge reports `head` (the sha just pushed), then
 ---rebuilds the session — what closing and reopening the review does by hand.
 ---@param mr_ctx table  { provider, remote, mr } of the rebased MR
----@param head string|nil  local HEAD after the rebase; nil = don't compare
+---@param head string|nil  HEAD of the rebased worktree; nil = don't compare
 local function sync_session(mr_ctx, head)
   local remote, iid = mr_ctx.remote, mr_ctx.mr.iid
   local function session_tab()
@@ -83,38 +85,38 @@ end
 
 -- ---------------------------------------------------------- success / push
 
----Pushes the rebased branch from `cwd`, then syncs the open review of the MR.
----`on_pushed` runs after the push whatever its outcome (worktree cleanup).
----@param cwd string  worktree or main repo the rebase ran in
----@param source string
----@param mr_ctx table
----@param on_pushed fun()|nil
-local function push_and_sync(cwd, source, mr_ctx, on_pushed)
+---@class ReviewRebaseJob
+---@field worktree string
+---@field source string   MR source branch (on origin)
+---@field target string   MR target branch (on origin)
+---@field lease string    sha origin/<source> had when the rebase started
+---@field mr_ctx table    { provider, remote, mr } of the rebased MR
+
+---Pushes the rebased worktree HEAD to origin/<source>, removes the worktree,
+---then syncs the open review of the MR.
+---@param job ReviewRebaseJob
+local function finish_with_push(job)
+  local source = job.source
   notify_util.progress(string.format("rebased %s, pushing (force-with-lease)...", source))
   -- Read before the push: the worktree goes away right after it.
-  rebase.head_sha(cwd, function(head)
-    rebase.push(cwd, source, function(res)
+  rebase.head_sha(job.worktree, function(head)
+    rebase.push(job.worktree, source, job.lease, function(res)
       if res.ok then
-        notify(string.format("!%s rebased & pushed", source))
+        notify(string.format("origin/%s rebased onto origin/%s & pushed", source, job.target))
+        if rebase.current_branch() == source then
+          notify(string.format(
+            "your local %s still has the pre-rebase history; update it from origin/%s",
+            source, source), vim.log.levels.WARN)
+        end
       else
         notify(string.format(
-          "%s rebased locally; push failed: %s (run `git push --force-with-lease` manually)",
-          source, res.error or "?"), vim.log.levels.WARN)
+          "push of the rebased %s failed (origin/%s moved since the rebase started?): %s",
+          source, source, res.error or "?"), vim.log.levels.WARN)
       end
-      if on_pushed then on_pushed() end
-      if res.ok then sync_session(mr_ctx, head) end
+      rebase.cleanup(job.worktree)
+      if res.ok then sync_session(job.mr_ctx, head) end
     end)
   end)
-end
-
-local function finish_with_push(worktree, source, mr_ctx)
-  push_and_sync(worktree, source, mr_ctx, function() rebase.cleanup(worktree) end)
-end
-
--- In-place variant: branch already current; no worktree to clean up. Push
--- runs in the main repo's cwd.
-local function finish_in_place_with_push(repo_root, source, mr_ctx)
-  push_and_sync(repo_root, source, mr_ctx)
 end
 
 -- ---------------------------------------------------------- conflict tab
@@ -123,11 +125,13 @@ end
 -- other (a "continue" that lands in another conflict re-opens the tab).
 local open_conflict_tab
 
-local function on_tab_closed(worktree, source, target, mr_ctx)
+---@param job ReviewRebaseJob
+local function on_tab_closed(job)
+  local worktree = job.worktree
   rebase.check_state(worktree, function(state)
     if state.unmerged then
       -- User closed without resolving everything -> abort.
-      notify(string.format("rebase of %s aborted (unmerged files left)", source),
+      notify(string.format("rebase of %s aborted (unmerged files left)", job.source),
         vim.log.levels.WARN)
       rebase.abort(worktree, function()
         rebase.cleanup(worktree)
@@ -139,7 +143,7 @@ local function on_tab_closed(worktree, source, target, mr_ctx)
       if res.conflict then
         -- Another batch of conflicts surfaced — re-open a fresh tab.
         notify("more conflicts after continue — opening conflict view")
-        open_conflict_tab(worktree, source, target, mr_ctx)
+        open_conflict_tab(job)
         return
       end
       if not res.ok then
@@ -148,14 +152,16 @@ local function on_tab_closed(worktree, source, target, mr_ctx)
         rebase.abort(worktree, function() rebase.cleanup(worktree) end)
         return
       end
-      finish_with_push(worktree, source, mr_ctx)
+      finish_with_push(job)
     end)
   end)
 end
 
 -- Per-tab augroup so multiple parallel rebases (different branches) don't
 -- step on each other's TabClosed handlers.
-local function watch_tab(tabnr, worktree, source, target, mr_ctx)
+---@param tabnr integer
+---@param job ReviewRebaseJob
+local function watch_tab(tabnr, job)
   local group = vim.api.nvim_create_augroup("ReviewRebaseTab_" .. tostring(tabnr), { clear = true })
   vim.api.nvim_create_autocmd("TabClosed", {
     group = group,
@@ -164,12 +170,14 @@ local function watch_tab(tabnr, worktree, source, target, mr_ctx)
       -- gone (compare against handle, not tabnr-position which can shift).
       if vim.api.nvim_tabpage_is_valid(tabnr) then return end
       pcall(vim.api.nvim_del_augroup_by_name, "ReviewRebaseTab_" .. tostring(tabnr))
-      on_tab_closed(worktree, source, target, mr_ctx)
+      on_tab_closed(job)
     end,
   })
 end
 
-open_conflict_tab = function(worktree, source, target, mr_ctx)
+---@param job ReviewRebaseJob
+open_conflict_tab = function(job)
+  local worktree = job.worktree
   vim.cmd("tabnew")
   local tabnr = vim.api.nvim_get_current_tabpage()
   -- Tab-local cwd so user's other tabs aren't affected. fnameescape handles
@@ -185,8 +193,8 @@ open_conflict_tab = function(worktree, source, target, mr_ctx)
   end
   notify(string.format(
     "rebase conflict on %s. Resolve, stage, then close this tab to continue (or close with conflicts to abort).",
-    source))
-  watch_tab(tabnr, worktree, source, target, mr_ctx)
+    job.source))
+  watch_tab(tabnr, job)
 end
 
 -- ---------------------------------------------------------- entry point
@@ -207,25 +215,6 @@ function M.run(target_opts)
       notify("not inside a git repo", vim.log.levels.ERROR); return
     end
 
-    -- In-place fallback when the branch is already checked out in the main
-    -- repo (worktree add would fail otherwise).
-    local current = rebase.current_branch()
-    if current == source then
-      notify(string.format(
-        "%s is the current branch — running in-place rebase on %s", source, target))
-      rebase.start_in_place(repo_root, target, function(res)
-        if res.ok then return finish_in_place_with_push(repo_root, source, target_ctx) end
-        if res.conflict then
-          notify("rebase conflict — resolve via your usual diff tools, then run "
-              .. "`git rebase --continue` or `git rebase --abort`",
-            vim.log.levels.WARN)
-          return
-        end
-        notify((res.error or "rebase failed"), vim.log.levels.ERROR)
-      end)
-      return
-    end
-
     -- Refuse to stack rebases on the same branch.
     local worktree = rebase.worktree_path(repo_root, source)
     if rebase.worktree_exists(worktree) then
@@ -235,15 +224,15 @@ function M.run(target_opts)
       return
     end
 
-    notify_util.progress(string.format("rebasing %s on %s (worktree)...", source, target))
+    notify_util.progress(string.format(
+      "rebasing origin/%s onto origin/%s (worktree)...", source, target))
     rebase.start(repo_root, source, target, function(res)
-      if res.ok then return finish_with_push(res.worktree, source, target_ctx) end
-      if res.conflict then return open_conflict_tab(res.worktree, source, target, target_ctx) end
-      if res.branch_busy then
-        -- Edge case: branch checked out in some OTHER worktree (not our
-        -- current branch). Worktree add can't proceed; bail.
-        notify("" .. res.error, vim.log.levels.WARN); return
-      end
+      local job = {
+        worktree = res.worktree, source = source, target = target,
+        lease = res.lease, mr_ctx = target_ctx,
+      }
+      if res.ok then return finish_with_push(job) end
+      if res.conflict then return open_conflict_tab(job) end
       notify((res.error or "rebase failed"), vim.log.levels.ERROR)
       if res.worktree then rebase.cleanup(res.worktree) end
     end)

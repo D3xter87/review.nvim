@@ -276,7 +276,7 @@ shortcuts for "open this MR with that panel up front":
 | `:ReviewSubmit`  | Publish all pending notes at once: verdict (Comment / Approve / Request changes) + optional summary. |
 | `:ReviewDiscard` | Delete all pending notes without publishing anything.    |
 | `:ReviewMerge`   | Open merge dialog (squash / delete src / close issue / auto-merge). |
-| `:ReviewRebase`  | Rebase source onto target + auto-push (worktree, no local branch change); an open review of the MR reloads on the new head. |
+| `:ReviewRebase`  | Rebase `origin/<source>` onto `origin/<target>` + push back (worktree, local branches untouched); an open review of the MR reloads on the new head. |
 | `:ReviewWeb`     | Open MR/PR in the default browser (works for any state). |
 | `:ReviewRequest` | List open MRs/PRs where you're a requested reviewer, then open one. |
 | `:ReviewMine`    | List your own open MRs/PRs (assignee or author), then open one. |

@@ -465,11 +465,20 @@ Close issue on merge                            ~
                                                                *:ReviewRebase*
 :ReviewRebase [{branch}|!{iid}]                 ~
 
-  Rebase the MR/PR's source branch onto its target and push the rewritten
-  history with `--force-with-lease`. Runs in a dedicated git worktree at
-  `<repo>/.git/review-rebase/<sanitized_source>` so the user's currently-
-  checked-out branch is not touched -- you can keep editing branch A while
-  rebasing branch B.
+  Rebase the MR/PR's source branch onto its target, working only on
+  origin's branches: both are fetched first, the rebase starts from
+  `origin/<source>`, goes onto `origin/<target>`, and the result is pushed
+  back to `origin/<source>`. Local branches are never read nor moved, so it
+  does not matter which branch you have checked out (the source branch
+  itself included) or whether your local copy of it is stale.
+
+  Runs in a dedicated, detached git worktree at
+  `<repo>/.git/review-rebase/<sanitized_source>` -- you can keep editing
+  branch A while rebasing branch B. The push is a force-with-lease against
+  the sha `origin/<source>` had when the rebase started: if someone pushes
+  to the branch in the meantime, the push fails instead of dropping their
+  commits. If the source branch is checked out locally, you get a warning
+  that it still has the pre-rebase history.
 
   Conflict flow:
     * A new tab opens with `:tcd <worktree>` and `:DiffviewOpen` (merge
@@ -481,10 +490,6 @@ Close issue on merge                            ~
       runs automatically.
     * No `:ReviewRebaseContinue` / `:ReviewRebaseAbort` -- closing the
       tab is the trigger.
-
-  Special case: when the MR's source branch IS the user's current branch,
-  a worktree can't be created (already checked out). The plugin falls
-  back to an in-place rebase in the main repo.
 
   Multiple parallel rebases on different branches of the same repo are
   supported (per-branch worktree paths, per-tab autocmd groups).
