@@ -35,6 +35,12 @@ local GROUPS = {
   ReviewLine            = "Number",
   ReviewSystemNote      = "Comment",
   ReviewMuted           = "Comment",
+  -- Pipeline status (Info "Pipeline" section, Pipeline panel; |review-ci|).
+  ReviewCiSuccess       = "DiagnosticOk",
+  ReviewCiFailed        = "DiagnosticError",
+  ReviewCiRunning       = "DiagnosticWarn",
+  ReviewCiManual        = "DiagnosticInfo",
+  ReviewCiMuted         = "Comment",
   -- Note-preview float (|review-note-preview|).
   ReviewPreviewNormal   = "NormalFloat",
   ReviewPreviewBorder   = "FloatBorder",
@@ -241,6 +247,9 @@ function M.apply_info(buf, lines, line_targets)
         if target.hl then hl(buf, row, 0, #line, target.hl) end
         hl_pattern(buf, row, line, "%(none%)", "ReviewMuted")
         hl_pattern(buf, row, line, "@[%w_%-%.]+", "ReviewAuthor")
+      elseif target.section == "pipeline" then
+        -- The renderer knows the status; `hl_end` limits it to "icon status".
+        if target.hl then hl(buf, row, 0, target.hl_end or #line, target.hl) end
       elseif target.section == "draft" then
         hl_pattern(buf, row, line, "%[[ x]%]%s*%w+", "ReviewDraft")
       elseif target.section == "labels" or target.section == "milestone" or target.section == "assignees" or target.section == "reviewers" then

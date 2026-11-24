@@ -28,6 +28,22 @@ function M.open(opts)
   require("review.controller").open(opts)
 end
 
+---The review open in the current tab (or in `tabnr`), or nil when there is
+---none. For other plugins and your config to act on "the MR/PR I'm looking
+---at" -- e.g. a CI/CD plugin defaulting to its branch. See |review-current|.
+---
+---Only the tab itself counts: a review parked in another tab is not "here".
+---Asking never loads the plugin, and the result carries no credentials.
+---@param tabnr? integer
+---@return { tabnr: integer, provider: string, host: string|nil, path: string|nil,
+---  repo_root: string|nil, iid: integer|nil, web_url: string|nil,
+---  source_branch: string|nil, target_branch: string|nil, head_sha: string|nil,
+---  mr: table }|nil
+function M.current(tabnr)
+  if not package.loaded["review.controller"] then return nil end
+  return require("review.ci").target(tabnr)
+end
+
 ---The :DiffviewOpen call review.nvim is making right now, or nil when the
 ---view being opened is not ours. Meant for diffview hooks (`view_opened`)
 ---that add UI of their own to diff views and should leave a review session

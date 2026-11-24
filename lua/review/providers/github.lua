@@ -473,6 +473,105 @@ function M.fetch_mr_details(remote, n, cb)
   end)
 end
 
+-- Check run (status + conclusion) → the review.ci vocabulary.
+local function check_run_status(run)
+  local status = nullable(run.status)
+  if status ~= "completed" then
+    return status == "in_progress" and "running" or "pending"
+  end
+  local c = nullable(run.conclusion)
+  if c == "success" then return "success" end
+  if c == "failure" or c == "timed_out" or c == "startup_failure" then return "failed" end
+  if c == "cancelled" then return "canceled" end
+  if c == "action_required" then return "manual" end
+  return "skipped" -- neutral, skipped, stale
+end
+
+-- Commit status (the legacy statuses API) → the review.ci vocabulary.
+local COMMIT_STATUS = { success = "success", pending = "pending", failure = "failed", error = "failed" }
+
+---The head commit's checks: its check runs (GitHub Actions and other apps)
+---and commit statuses (external CI on the older API), one job row each, all
+---in one "checks" stage. Read-only -- the built-in CI adapter has no
+---actions (|review-ci|).
+---@param remote table
+---@param mr table  normalized PR
+---@param cb fun(pipeline: table|nil, err: string|nil)
+function M.fetch_pipeline_status(remote, mr, cb)
+  local sha = mr.sha or mr.head_sha
+  if not sha then return cb(nil, "PR has no head commit") end
+  local jobs, pending, failure = {}, 2, nil
+  local function finish()
+    pending = pending - 1
+    if pending > 0 then return end
+    if failure and #jobs == 0 then return cb(nil, failure) end
+    table.sort(jobs, function(a, b) return a.name < b.name end)
+    cb({
+      status = #jobs == 0 and "none" or nil, -- otherwise derived from the rows
+      web_url = mr.web_url and (mr.web_url .. "/checks") or nil,
+      sha = sha,
+      jobs = jobs,
+    })
+  end
+
+  client.request({
+    url = repo_url(remote, "/commits/" .. sha .. "/check-runs"),
+    method = "get",
+    headers = remote.headers,
+    query = { per_page = 100 },
+  }, function(res)
+    local body = res.ok and client.decode_json(res.body)
+    if type(body) == "table" then
+      for _, run in ipairs(nullable(body.check_runs) or {}) do
+        local started, ended = nullable(run.started_at), nullable(run.completed_at)
+        local duration
+        if started and ended then
+          local function epoch(ts)
+            local y, mo, d, h, mi, s = ts:match("(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
+            if not y then return nil end
+            return os.time({ year = y, month = mo, day = d, hour = h, min = mi, sec = s })
+          end
+          local a, b = epoch(started), epoch(ended)
+          duration = a and b and (b - a) or nil
+        end
+        table.insert(jobs, {
+          id = nullable(run.id),
+          name = nullable(run.name) or "?",
+          stage = "checks",
+          status = check_run_status(run),
+          duration = duration,
+          web_url = nullable(run.html_url) or nullable(run.details_url),
+        })
+      end
+    else
+      failure = res.err or "failed to list check runs"
+    end
+    finish()
+  end)
+
+  client.request({
+    url = repo_url(remote, "/commits/" .. sha .. "/status"),
+    method = "get",
+    headers = remote.headers,
+  }, function(res)
+    local body = res.ok and client.decode_json(res.body)
+    if type(body) == "table" then
+      for _, s in ipairs(nullable(body.statuses) or {}) do
+        table.insert(jobs, {
+          id = nullable(s.id),
+          name = nullable(s.context) or "?",
+          stage = "checks",
+          status = COMMIT_STATUS[nullable(s.state)] or "pending",
+          web_url = nullable(s.target_url),
+        })
+      end
+    else
+      failure = failure or res.err or "failed to read commit status"
+    end
+    finish()
+  end)
+end
+
 function M.fetch_mr_commits(remote, n, cb)
   fetch_paginated(pr_url(remote, n, "/commits"), nil, remote.headers, function(list, err)
     if not list then return cb(nil, err) end

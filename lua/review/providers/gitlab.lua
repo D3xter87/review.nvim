@@ -562,6 +562,51 @@ end
 ---    rules }                         -- per-rule state, nil when unavailable
 ---`approved_by` lists every approver, whether or not the approval counts
 ---towards a rule; a rule's own `approved_by` only those that do.
+-- GitLab pipeline statuses → the review.ci vocabulary.
+local PIPELINE_STATUS = {
+  success = "success",
+  failed = "failed",
+  running = "running",
+  pending = "pending",
+  preparing = "pending",
+  waiting_for_resource = "pending",
+  scheduled = "pending",
+  created = "created",
+  manual = "manual",
+  canceled = "canceled",
+  canceling = "canceled",
+  skipped = "skipped",
+}
+
+---Status of the MR's latest pipeline -- the one its MR page shows, detached
+---merge-request and merged-results pipelines included (their ref / sha is
+---not the source branch's, so this asks the MR, not the branch). No jobs:
+---the built-in CI adapter only reports the status (|review-ci|).
+---@param remote table
+---@param mr table  normalized MR
+---@param cb fun(pipeline: table|nil, err: string|nil)
+function M.fetch_pipeline_status(remote, mr, cb)
+  client.request({
+    url = mr_url(remote, mr.iid, "/pipelines"),
+    method = "get",
+    headers = remote.headers,
+    query = { per_page = 1 },
+  }, function(res)
+    if not res.ok then return cb(nil, gl_error_detail(res) or res.err or "failed to list MR pipelines") end
+    local list = client.decode_json(res.body)
+    local p = type(list) == "table" and list[1] or nil
+    if type(p) ~= "table" then return cb({ status = "none", jobs = {} }) end
+    local status = nullable(p.status)
+    cb({
+      id = nullable(p.id),
+      status = PIPELINE_STATUS[status] or status or "created",
+      web_url = nullable(p.web_url),
+      sha = nullable(p.sha),
+      jobs = {},
+    })
+  end)
+end
+
 ---@param remote table
 ---@param iid string|number
 ---@param cb fun(approval: table|nil, err: string|nil)

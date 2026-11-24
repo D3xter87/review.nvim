@@ -1,4 +1,4 @@
--- Bottom split holding the rotating panel: commits | info | notes.
+-- Bottom split holding the rotating panel: info | pipeline | commits | notes.
 -- One buffer, mode-specific render + buffer-local keymaps. The active mode is
 -- stored in state.panel.mode; changing modes re-renders the buffer in place.
 --
@@ -14,6 +14,7 @@ local discussion_util = require("review.util.discussion")
 local panel_hl = require("review.ui.panel_highlights")
 local commit_preview = require("review.ui.commit_preview")
 local git_log = require("review.git.log")
+local ci = require("review.ci")
 
 local FT = "review-panel"
 
@@ -21,6 +22,7 @@ local TITLE = {
   commits = "Commits",
   info = "Info",
   notes = "Notes",
+  pipeline = "Pipeline",
 }
 
 -- Each hint entry is a { key, label } pair so the winbar can spell out what
@@ -147,8 +149,10 @@ local function clear_buffer_keymaps()
   local p = panel_state()
   if not p.buf or not vim.api.nvim_buf_is_valid(p.buf) then return end
   -- j / k too: Info maps them to section jumps, the other modes must get
-  -- plain line motion back. K is the Commits float.
-  for _, key in ipairs({ "<CR>", "d", "e", "c", "a", "r", "R", "s", "P", "S", "X", "j", "k", "K" }) do
+  -- plain line motion back. K is the Commits float; L / o / O / B the
+  -- Pipeline panel's.
+  for _, key in ipairs({ "<CR>", "d", "e", "c", "a", "r", "R", "s", "P", "S", "X", "j", "k", "K",
+    "L", "o", "O", "B" }) do
     pcall(vim.api.nvim_buf_del_keymap, p.buf, "n", key)
   end
 end
@@ -613,6 +617,200 @@ function tracker_issue(branch)
   return key, entry and entry.status and entry or nil
 end
 
+-- ------------------------------------------------------ Pipeline (review.ci)
+
+-- Failed job names listed in the one-line summary before "+N".
+local FAILED_NAMES_MAX = 4
+
+---"✗ failed  ·  12/15 ok  ·  1 running  ·  failed: build, lint" -- the
+---pipeline in one line, and the byte length of its "icon status" head (the
+---part coloured by status).
+---@param p table  normalized pipeline (review.ci)
+---@return string text, integer head_len
+local function ci_summary(p)
+  local head = ci.icon(p.status) .. " " .. (p.status == "none" and "no pipeline" or p.status)
+  local parts = { head }
+  local c = p.counts or ci.counts(p.jobs)
+  if c.total > 0 then table.insert(parts, ("%d/%d ok"):format(c.succeeded, c.total)) end
+  if c.running > 0 then table.insert(parts, ("%d running"):format(c.running)) end
+  if #c.failed_names > 0 then
+    local names = vim.list_slice(c.failed_names, 1, FAILED_NAMES_MAX)
+    local more = #c.failed_names - #names
+    table.insert(parts, "failed: " .. table.concat(names, ", ") .. (more > 0 and (" +" .. more) or ""))
+  end
+  return table.concat(parts, "  ·  "), #head
+end
+
+---Body of the Info "Pipeline" section: { text, hl, hl_end } rows.
+---@return { text: string, hl: string|nil, hl_end: integer|nil }[]
+local function ci_info_lines()
+  local state = ci.get()
+  if not state then return {} end
+  local p = state.pipeline
+  if not p then
+    if state.err then return { { text = "(error: " .. state.err .. ")", hl = "ReviewCiFailed" } } end
+    return { { text = "(loading…)", hl = "ReviewMuted" } }
+  end
+  local text, head_len = ci_summary(p)
+  local out = { { text = text, hl = ci.hl(p.status), hl_end = head_len } }
+  if state.err then
+    table.insert(out, { text = "(last refresh failed: " .. state.err .. ")", hl = "ReviewMuted" })
+  end
+  return out
+end
+
+local function format_duration(secs)
+  if type(secs) ~= "number" or secs <= 0 then return "" end
+  secs = math.floor(secs + 0.5)
+  if secs < 60 then return secs .. "s" end
+  if secs < 3600 then return ("%dm%02ds"):format(math.floor(secs / 60), secs % 60) end
+  return ("%dh%02dm"):format(math.floor(secs / 3600), math.floor(secs % 3600 / 60))
+end
+
+---Display width of `s` padded with spaces to `width` cells.
+local function pad(s, width)
+  local w = vim.fn.strdisplaywidth(s)
+  if w >= width then return s end
+  return s .. string.rep(" ", width - w)
+end
+
+---Hints of the Pipeline mode: only the keys the adapter can serve.
+local function pipeline_hints()
+  local caps = ci.capabilities()
+  local out = {}
+  if caps.run then table.insert(out, { "<CR>", "retry/play/cancel" }) end
+  table.insert(out, { "L", caps.log and "log" or "job page" })
+  table.insert(out, { "o", "job page" })
+  table.insert(out, { "O", "pipeline page" })
+  if caps.open then table.insert(out, { "B", caps.name }) end
+  table.insert(out, { "r", "refresh" })
+  table.insert(out, { "h/[", "prev mode" })
+  table.insert(out, { "l/]", "next mode" })
+  table.insert(out, { "q", "end review" })
+  return out
+end
+
+local function render_pipeline()
+  local p = panel_state()
+  p.line_targets = {}
+  local lines, marks = {}, {}
+  local function mark(group, s, e)
+    table.insert(marks, { #lines - 1, s, e, group })
+  end
+
+  local state = ci.get() or {}
+  local pipeline = state.pipeline
+
+  if not pipeline then
+    if state.err then
+      table.insert(lines, "(error: " .. state.err .. ")")
+      mark("ReviewCiFailed", 0, #lines[#lines])
+    else
+      table.insert(lines, "(loading…)")
+      mark("ReviewMuted", 0, #lines[#lines])
+    end
+  else
+    local text, head_len = ci_summary(pipeline)
+    local extra = {}
+    if pipeline.sha then table.insert(extra, tostring(pipeline.sha):sub(1, 8)) end
+    if pipeline.label then table.insert(extra, pipeline.label) end
+    if #extra > 0 then text = text .. "  ·  " .. table.concat(extra, "  ") end
+    table.insert(lines, text)
+    p.line_targets[#lines] = { kind = "ci_header" }
+    mark(ci.hl(pipeline.status), 0, head_len)
+
+    if state.err then
+      table.insert(lines, "(last refresh failed: " .. state.err .. ")")
+      mark("ReviewMuted", 0, #lines[#lines])
+    end
+
+    if #pipeline.jobs == 0 then
+      if pipeline.status ~= "none" then
+        table.insert(lines, "")
+        table.insert(lines, "(no job details - O opens the pipeline; a CI plugin can add jobs, see :h review-ci)")
+        mark("ReviewMuted", 0, #lines[#lines])
+      end
+    else
+      -- Stages in order of first appearance, jobs in the adapter's order.
+      local stages, by_stage = {}, {}
+      for _, job in ipairs(pipeline.jobs) do
+        local stage = job.stage or "jobs"
+        if not by_stage[stage] then
+          by_stage[stage] = {}
+          table.insert(stages, stage)
+        end
+        table.insert(by_stage[stage], job)
+      end
+      local name_w, status_w = 0, 0
+      for _, job in ipairs(pipeline.jobs) do
+        name_w = math.max(name_w, vim.fn.strdisplaywidth(job.name or "?"))
+        status_w = math.max(status_w, #job.status)
+      end
+      name_w = math.min(name_w, 48)
+
+      for _, stage in ipairs(stages) do
+        table.insert(lines, "")
+        table.insert(lines, string.format("── %s ──", stage))
+        p.line_targets[#lines] = { kind = "ci_stage", stage = stage }
+        mark("ReviewSectionHeader", 0, #lines[#lines])
+        for _, job in ipairs(by_stage[stage]) do
+          local icon = ci.icon(job.status)
+          local name = job.name or "?"
+          if vim.fn.strdisplaywidth(name) > name_w then
+            name = vim.fn.strcharpart(name, 0, name_w - 1) .. "…"
+          end
+          local prefix = "  " .. icon .. " " .. pad(name, name_w) .. "  "
+          local row = prefix .. pad(job.status, status_w)
+          local status_s = #prefix
+          local status_e = #row
+          local dur = format_duration(job.duration)
+          if dur ~= "" then row = row .. "  " .. pad(dur, 7) else row = row .. "  " .. pad("", 7) end
+          local action_s
+          if job.action then
+            action_s = #row + 2
+            row = row .. "  [" .. (job.action_label or job.action) .. "]"
+          end
+          table.insert(lines, (row:gsub("%s+$", "")))
+          p.line_targets[#lines] = { kind = "ci_job", job = job }
+          local group = ci.hl(job.status)
+          mark(group, 2, 2 + #icon)
+          mark(group, status_s, status_e)
+          if action_s then mark("ReviewMuted", action_s, #lines[#lines]) end
+        end
+      end
+    end
+  end
+
+  set_lines(lines)
+  panel_hl.clear(p.buf)
+  panel_hl.apply_marks(p.buf, marks)
+
+  clear_buffer_keymaps()
+  local function job_here()
+    local t = current_target()
+    return t and t.kind == "ci_job" and t.job or nil
+  end
+  local tabnr = vim.api.nvim_get_current_tabpage()
+  map("<CR>", function()
+    local job = job_here()
+    if job then ci.run(tabnr, job) end
+  end)
+  map("L", function()
+    local job = job_here()
+    if job then ci.log(tabnr, job) end
+  end)
+  map("o", function()
+    local job = job_here()
+    if job then ci.open_url(job.web_url, job.name or "job") end
+  end)
+  map("O", function()
+    local st = ci.get(tabnr)
+    ci.open_url(st and st.pipeline and st.pipeline.web_url, "the pipeline")
+  end)
+  map("B", function() ci.open(tabnr) end)
+  map("r", function() ci.fetch(tabnr) end)
+end
+
 local function render_description()
   local p = panel_state()
   p.line_targets = {}
@@ -649,6 +847,15 @@ local function render_description()
     push_content(lines, p, "tracker", issue
       and ("%s  [%s]  %s"):format(issue_key, issue.status, issue.summary)
       or (issue_key .. "  (loading…)"))
+  end
+
+  -- CI/CD of the MR (review.ci): `e` opens the Pipeline panel.
+  if ci.enabled() then
+    push_section(lines, p, "pipeline", "Pipeline")
+    for _, l in ipairs(ci_info_lines()) do
+      table.insert(lines, l.text)
+      p.line_targets[#lines] = { kind = "section_body", section = "pipeline", hl = l.hl, hl_end = l.hl_end }
+    end
   end
 
   push_section(lines, p, "draft", "Draft")
@@ -732,6 +939,10 @@ local function render_description()
       local key = tracker_issue(mr.source_branch)
       local ok, tracker = pcall(require, "tracker")
       if key and ok then tracker.issue(key) end
+      return
+    end
+    if t.section == "pipeline" then
+      M.set_mode("pipeline")
       return
     end
     if M.hooks.on_section_edit then M.hooks.on_section_edit(t.section) end
@@ -908,6 +1119,7 @@ local RENDERERS = {
   commits = render_commits,
   info = render_description,
   notes = render_comments,
+  pipeline = render_pipeline,
 }
 
 -- ---------------------------------------------------------------- public API
@@ -946,7 +1158,14 @@ end
 
 local function build_winbar(mode)
   local title = TITLE[mode] or "Panel"
-  local hints = format_hints(mode == "notes" and notes_hints() or HINTS[mode])
+  local hint_list = HINTS[mode]
+  if mode == "notes" then
+    hint_list = notes_hints()
+  elseif mode == "pipeline" then
+    hint_list = pipeline_hints()
+    title = title .. " (" .. ci.capabilities().name .. ")"
+  end
+  local hints = format_hints(hint_list)
   local badge = review_badge()
   if badge then title = title .. "  " .. badge end
   if mode == "notes" then
@@ -1016,10 +1235,12 @@ end
 
 function M.set_mode(mode)
   if not RENDERERS[mode] then return end
+  if mode == "pipeline" and not ci.enabled() then return end
   local p = panel_state()
   -- A commit float belongs to the rows it was opened from: a re-render or a
   -- mode switch leaves it pointing at nothing.
   commit_preview.close()
+  local switched = p.mode ~= mode
   p.mode = mode
   if not p.buf or not vim.api.nvim_buf_is_valid(p.buf) then return end
   RENDERERS[mode]()
@@ -1030,6 +1251,11 @@ function M.set_mode(mode)
     setup_notes_folds()
   else
     clear_folds()
+  end
+  -- Coming back to the pipeline after a while: show where it is now. Only on
+  -- a switch -- a re-render must never start a fetch (the fetch re-renders).
+  if switched and (mode == "info" or mode == "pipeline") then
+    ci.ensure_fresh(vim.api.nvim_get_current_tabpage())
   end
 end
 
@@ -1072,8 +1298,13 @@ function M.refresh()
   M.set_mode(p.mode or "commits")
 end
 
--- Public mode order used by the `[` / `]` keymaps.
-local MODE_CYCLE = { "info", "commits", "notes" }
+---Public mode order used by the `[` / `]` keymaps. Pipeline sits next to
+---Info (both describe the MR) and only exists with `ci.enabled`.
+---@return string[]
+local function mode_cycle()
+  if ci.enabled() then return { "info", "pipeline", "commits", "notes" } end
+  return { "info", "commits", "notes" }
+end
 
 ---Switches to the mode `step` slots away from the current one (1 = next,
 ----1 = previous). Wraps around at both ends.
@@ -1081,15 +1312,16 @@ local MODE_CYCLE = { "info", "commits", "notes" }
 function M.cycle_mode(step)
   local p = panel_state()
   local current = p.mode or "info"
+  local cycle = mode_cycle()
   local idx
-  for i, m in ipairs(MODE_CYCLE) do
+  for i, m in ipairs(cycle) do
     if m == current then idx = i; break end
   end
   if not idx then idx = 1 end
-  local n = #MODE_CYCLE
+  local n = #cycle
   -- Lua's modulo on negative offsets needs the +n nudge to land in [1, n].
   local next_idx = ((idx - 1 + step) % n + n) % n + 1
-  M.set_mode(MODE_CYCLE[next_idx])
+  M.set_mode(cycle[next_idx])
 end
 
 function M.open(initial_mode)
@@ -1119,7 +1351,7 @@ function M.open(initial_mode)
   -- mode-specific (clear_buffer_keymaps doesn't touch them).
   --   q       close the panel (delegates to controller).
   --   ] / [   cycle bottom panel mode forward / backward through
-  --   l / h   info -> commits -> notes -> info ... (h / l: the panel lines
+  --   l / h   info -> pipeline -> commits -> notes -> info ... (h / l: the panel lines
   --           don't need horizontal motion, the modes read as columns)
   local opts = { buffer = p.buf, silent = true, noremap = true, nowait = true }
   vim.keymap.set("n", "q", function()
@@ -1130,7 +1362,11 @@ function M.open(initial_mode)
   vim.keymap.set("n", "l", function() M.cycle_mode(1) end, opts)
   vim.keymap.set("n", "h", function() M.cycle_mode(-1) end, opts)
 
-  M.set_mode(initial_mode or "commits")
+  initial_mode = initial_mode or "commits"
+  -- A mode that is switched off (Pipeline without `ci.enabled`) would leave
+  -- the new panel blank.
+  if initial_mode == "pipeline" and not ci.enabled() then initial_mode = "info" end
+  M.set_mode(initial_mode)
 end
 
 function M.close()

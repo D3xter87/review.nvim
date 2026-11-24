@@ -27,6 +27,7 @@ CONTENTS                                                     *review-contents*
        Spent-time refs trailer .......................... |review-refs-line|
        :ReviewInfo / :ReviewCommits / :ReviewNotes ...... |:ReviewInfo|
   8. Bottom panel ........................................ |review-panel|
+       Pipeline (CI/CD) ................................. |review-ci|
   9. Diffview key-map .................................... |review-diff-keys|
  10. Notes in the code ................................... |review-note-preview|
        Unresolved-thread navigation ..................... |review-notes-nav|
@@ -643,7 +644,8 @@ Spent-time refs trailer                         ~
 8. Bottom panel                                                *review-panel*
 
 The bottom panel is a `botright split` (default 12 lines tall). It has
-three modes; switching modes preserves the panel buffer/window.
+four modes -- Info, Pipeline (with `ci.enabled`, the default), Commits and
+Notes; switching modes preserves the panel buffer/window.
 
 The header line shows: !iid . author . source -> target . state . approval
 . ready-to-merge . auto-merge. Approval and ready-to-merge segments only
@@ -673,6 +675,11 @@ INFO ~
                     shows at once; one made in Jira's web UI when you
                     come back to Neovim or to the panel (fetched again
                     when older than 30 s).
+
+    Pipeline        read-only: the MR/PR's pipeline in one line, e.g.
+                    `✗ failed · 12/15 ok · 1 running · failed: lint`;
+                    `e` opens the Pipeline mode. Hidden with
+                    `ci.enabled = false`. See |review-ci|.
 
     Draft           toggle (no input -- flips draft state).
                     GitLab encodes draft as a `Draft:` prefix in the title;
@@ -752,6 +759,98 @@ COMMITS ~                                              *review-panel-commits*
                yank); `q` / <Esc> there closes it, as does moving the
                cursor in the panel.
 
+PIPELINE ~                                    *review-panel-pipeline* *review-ci*
+
+  The CI/CD of the MR/PR: a summary line (status, `passed/total`, running,
+  failed jobs, head commit), then the jobs grouped by stage, each with its
+  status, duration and -- when something can be done to it -- the action
+  `<CR>` runs:
+>
+    ✗ failed  ·  1/3 ok  ·  1 running  ·  failed: lint  ·  a1b2c3d4
+    ── build ──
+      ✓ build   success  1m23s
+    ── test ──
+      ✗ lint    failed            [retry]
+      ● unit    running           [cancel]
+    ── deploy ──
+      ▶ deploy  manual            [play]
+<
+  <CR>     on a job: its action -- retry, play or cancel (asks first)
+  L        the job's log (the job page when the adapter has no logs)
+  o        the job's page in the browser
+  O        the pipeline's page in the browser
+  B        the CI plugin's own pipeline view (only when it has one)
+  r        refresh
+
+  The same data feeds the Info panel's Pipeline section. It is fetched
+  when the session opens and when the MR is refreshed (a push moves the
+  head), and again every `ci.poll_interval_ms` while the pipeline is
+  running and the Info or Pipeline panel is on screen, or when one of them
+  comes back after a while.
+
+  Where the data comes from ~
+                                                          *review-ci-adapter*
+  The CI feature needs no CI/CD plugin. `ci.adapter` in |review-config|
+  is a table of functions a CI plugin -- or your own code -- provides:
+
+    `name`                  shown in the Pipeline panel's title
+    `fetch(target, cb)`     required; `cb(pipeline)` or `cb(nil, err)`
+    `run(target, job, cb)`  `<CR>`: do `job.action`; `cb(ok, err)`
+    `log(target, job)`      `L`: show the job's log
+    `open(target)`          `B`: the plugin's own view of the pipeline
+
+  `target` is what |review.current()| returns for the session. The
+  pipeline `fetch` hands back: >lua
+    {
+      status  = "failed",  -- success failed running pending created
+                           -- manual canceled skipped, or "none"; derived
+                           -- from the jobs when missing
+      web_url = "https://...",
+      sha     = "...",     -- optional, shown in the summary
+      label   = "...",     -- optional, shown in the summary
+      jobs = {
+        { name = "lint", stage = "test", status = "failed",
+          duration = 83,             -- seconds, optional
+          web_url = "https://...",   -- optional
+          action = "retry",          -- "retry" | "play" | "cancel" | nil
+          action_label = "re-run" }, -- optional wording for the action
+      },
+    }
+<
+  Errors in any of them are caught and reported; the last data stays on
+  screen. A missing `fetch` falls back to the built-in adapter.
+
+  Without an adapter (built-in) the status is read from the forge API
+  review.nvim already uses: GitLab -- the MR's latest pipeline, the one its
+  MR page shows (merge-request and merged-results pipelines included), no
+  jobs; GitHub -- the head commit's check runs and commit statuses, one
+  read-only row each. `O` opens the pipeline / checks page.
+
+  Example: cicd.nvim as the adapter. Its |cicd-api| takes the target as
+  `{ mr_iid, commit_sha, branch, root, label }`: >lua
+    local function cicd_opts(t)
+      return {
+        mr_iid = t.iid, commit_sha = t.head_sha, branch = t.source_branch,
+        root = t.repo_root,
+        label = (t.provider == "github" and "#" or "!") .. tostring(t.iid),
+      }
+    end
+    require("review").setup({
+      ci = {
+        adapter = {
+          name  = "cicd.nvim",
+          fetch = function(t, cb) require("cicd.api").fetch(cicd_opts(t), cb) end,
+          run   = function(t, job, cb) require("cicd.api").run(cicd_opts(t), job, cb) end,
+          log   = function(t, job) require("cicd.api").log(cicd_opts(t), job) end,
+          open  = function(t) require("cicd.api").open(cicd_opts(t)) end,
+        },
+      },
+    })
+<
+  The other direction -- that plugin's commands defaulting to the review
+  open in the current tab -- is its business: hand it |review.current()|
+  (for cicd.nvim through its `default_target` option).
+
 NOTES ~
 
   All comments / suggestions / reviews-with-body. The winbar shows
@@ -762,8 +861,10 @@ Always-on key-map ~
 
 These keys work in every mode while the panel has focus:
 
-  ] l            switch to the next mode (info -> commits -> notes -> info)
-  [ h            switch to the previous mode (info -> notes -> commits -> info)
+  ] l            switch to the next mode
+                 (info -> pipeline -> commits -> notes -> info)
+  [ h            switch to the previous mode (the other way round)
+                 Pipeline is left out with `ci.enabled = false`.
   q              end the review session
 
 The mode-specific keys (`e` / `j` / `k` in Info, `<CR>` / `K` in Commits,
@@ -979,6 +1080,14 @@ dedicated highlight groups, each linked to a sensible default with
   ReviewLine            `Number`           line numbers in note headers
   ReviewMuted           `Comment`          "(global)", "(none)", "(empty)"
 
+Pipeline (|review-ci|), Info section and Pipeline panel:
+
+  ReviewCiSuccess       `DiagnosticOk`     success
+  ReviewCiFailed        `DiagnosticError`  failed, fetch errors
+  ReviewCiRunning       `DiagnosticWarn`   running / pending / created
+  ReviewCiManual        `DiagnosticInfo`   manual (waiting for a click)
+  ReviewCiMuted         `Comment`          canceled / skipped / no pipeline
+
 Note-preview float only (|review-note-preview|):
 
   ReviewPreviewNormal   `NormalFloat`      float background
@@ -1128,6 +1237,16 @@ Defaults: >lua
       on_merged = nil,  -- fun(info)
     },
 
+    -- CI/CD of the MR/PR: Info "Pipeline" section + Pipeline panel mode.
+    -- adapter = nil reads the status from the forge API; a CI/CD plugin
+    -- or your own functions provide jobs / actions / logs. See |review-ci|.
+    ci = {
+      enabled          = true,
+      adapter          = nil,  -- { name, fetch, run?, log?, open? }
+      poll_interval_ms = 15 * 1000,  -- while running + panel on screen;
+                                     -- 0 = only on `r`
+    },
+
     debug = false,
   }
 <
@@ -1155,6 +1274,39 @@ require("review").open({opts})                  ~
   Start (or focus) a review session. `opts` is `{ branch = "..." }` or
   `{ iid = N }`. Same as |:Review| with the corresponding argument.
 
+                                         *review.current()* *review-current*
+require("review").current({tabnr})              ~
+
+  The review open in the current tab (or in tab {tabnr}), or `nil` when
+  there is none. For other plugins and your config to act on "the MR/PR
+  I'm looking at" -- a CI/CD plugin's commands defaulting to its branch,
+  say. Only the tab itself counts: a review parked in another tab is not
+  "here". Asking never loads review.nvim, and the result carries no
+  credentials: >lua
+    {
+      tabnr = 3,
+      provider = "gitlab",          -- or "github"
+      host = "gitlab.example.com",
+      path = "group/project",       -- owner/repo on GitHub
+      repo_root = "/path/to/repo",  -- local repository of the session
+      iid = 42,                     -- MR / PR number
+      web_url = "https://...",
+      source_branch = "feature-x",
+      target_branch = "main",
+      head_sha = "...",             -- head commit, full sha
+      mr = { ... },                 -- the normalized MR/PR
+    }
+<
+  Example -- `:Cicd` in a review tab shows that MR's pipeline (cicd.nvim's
+  `default_target` option): >lua
+    default_target = function()
+      local review = package.loaded["review"]
+      local t = review and review.current()
+      if not t then return nil end
+      return { mr_iid = t.iid, commit_sha = t.head_sha,
+               branch = t.source_branch, root = t.repo_root }
+    end,
+<
                                  *review.diffview_request()* *review-diffview-request*
 require("review").diffview_request()            ~
 

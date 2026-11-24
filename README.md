@@ -70,6 +70,16 @@ with feature parity.
   the `close_issue.detect` / `close_issue.on_merged` hooks let an issue
   tracker plugin or your own function supply the issues and react once the
   merge lands.
+- **CI/CD of the MR/PR**: the Info panel's **Pipeline** section sums up its
+  pipeline (`✗ failed · 12/15 ok · failed: lint`), and the **Pipeline**
+  panel mode lists the jobs by stage — `<CR>` retries / plays / cancels a
+  job, `L` shows its log, `o` / `O` open the job / pipeline page, `B` your
+  CI plugin's own view. Out of the box it reads the status from the forge
+  API (GitHub: the head commit's checks); jobs, actions and logs come from
+  a CI/CD plugin you plug in through `ci.adapter` — the feature itself needs
+  none. `require("review").current()` tells other plugins which MR/PR the
+  current tab reviews, e.g. so `:Cicd` there defaults to its branch. See
+  `:help review-ci`.
 - `:ReviewApprove`, `:ReviewRevoke`, `:ReviewMerge`, `:ReviewClose`,
   `:ReviewOpen` all accept an optional `[branch|!iid]` argument so you
   can act on any MR/PR without losing the active review session.
@@ -226,6 +236,15 @@ require("review").setup({
     detect    = nil,  -- fun(info): string[]|string|nil  what to prefill
     on_merged = nil,  -- fun(info)  runs once the MR/PR has merged
   },
+
+  -- CI/CD: Info "Pipeline" section + Pipeline panel mode. adapter = nil
+  -- reads the status from the forge API; a CI/CD plugin plugs in its jobs,
+  -- actions and logs here — see :help review-ci.
+  ci = {
+    enabled = true,
+    adapter = nil,  -- { name, fetch(target, cb), run?, log?, open? }
+    poll_interval_ms = 15000,  -- while it runs and the panel is on screen
+  },
 })
 ```
 
@@ -282,7 +301,8 @@ through `:ReviewSubmit` while the pending review exists. Details:
 `:help review-pending`.
 
 Always-on panel keys (any mode): `]` next mode · `[` prev mode · `q` end
-review. Mode order: info → commits → notes (wraps).
+review. Mode order: info → pipeline → commits → notes (wraps; pipeline only
+with `ci.enabled`).
 
 Notes use native vim folds (`za`/`zo`/`zc`/`zM`/`zR`). Default is "all
 collapsed"; cursor movement in the diffview windows auto-expands the

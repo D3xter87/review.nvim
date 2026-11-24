@@ -16,7 +16,10 @@ local notify_util = require("review.util.notify")
 
 local function notify(msg, level) notify_util.legacy(msg, level) end
 
-local function open_external(url)
+---Open `url` in the system browser. Also used by the Pipeline panel.
+---@param url string
+---@return boolean ok
+function M.open_external(url)
   if type(vim.ui.open) == "function" then
     local ok, err = pcall(vim.ui.open, url)
     if ok then return true end
@@ -44,7 +47,7 @@ function M.run(target_opts)
       notify_util.warn("MR has no web URL")
       return
     end
-    if open_external(url) then
+    if M.open_external(url) then
       notify("opened " .. url)
     else
       notify_util.warn("could not open browser - copy URL manually: " .. url)

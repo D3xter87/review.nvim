@@ -270,6 +270,8 @@ function M.refresh_mr_details()
     end
     ctx.mr = mr
     if session then session.mr = mr end
+    -- A push moves the head, and with it the pipeline to show.
+    require("review.ci").fetch(ctx.tabnr)
     if type(ctx.provider.fetch_approvals) == "function" then
       ctx.provider.fetch_approvals(ctx.remote, mr.iid, function(approval)
         if approval then
@@ -435,6 +437,7 @@ local function start_session(provider, remote, branch, full, initial_mode)
     wire_panel_hooks()
     bottom_panel.open(initial_mode)
     highlights.refresh(full.discussions)
+    require("review.ci").fetch(tabnr)
 
     notify(string.format("!%s opened (%s -> %s)",
       tostring(full.mr.iid), full.mr.source_branch or "?", full.mr.target_branch or "?"))
@@ -747,6 +750,7 @@ function M.close(tabnr)
   pcall(bottom_panel.close)
   pcall(highlights.clear)
   pcall(diffview_int.close)
+  pcall(require("review.ci").stop, tabnr)
   state_mod.delete_for_tab(tabnr)
 
   ctx_by_tab[tabnr] = nil

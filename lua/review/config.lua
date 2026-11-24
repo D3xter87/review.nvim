@@ -100,6 +100,29 @@ local defaults = {
     on_merged = nil,
   },
 
+  -- CI/CD of the MR/PR: a "Pipeline" section in the Info panel and a
+  -- Pipeline panel mode with the jobs. See |review-ci|.
+  --
+  -- `adapter` is how a CI/CD plugin (or your own function) takes part; the
+  -- CI feature needs none. nil = built-in: the pipeline's status, read
+  -- through the MR/PR API (GitHub: its checks as rows), and the browser.
+  -- A table with:
+  --   name                  shown in the Pipeline panel's title
+  --   fetch(target, cb)     required. cb(pipeline|nil, err)
+  --   run(target, job, cb)  <CR> on a job: its `job.action`. cb(ok, err)
+  --   log(target, job)      L on a job
+  --   open(target)          B: the plugin's own pipeline UI
+  -- target = require("review").current() of the session; pipeline =
+  --   { status, web_url, jobs = { { name, stage, status, duration,
+  --     web_url, action, action_label }, ... } }
+  ci = {
+    enabled = true,
+    adapter = nil,
+    -- Poll while the pipeline is running and the Info / Pipeline panel is on
+    -- screen. 0 = never (refresh with `r` in the Pipeline panel).
+    poll_interval_ms = 15 * 1000,
+  },
+
   debug = false,
 }
 

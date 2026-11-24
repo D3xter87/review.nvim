@@ -26,6 +26,7 @@ local M = {}
 ---@field repo string|nil  repo root the session's diffview is pinned to
 ---@field commit_info ReviewCommitInfo|nil  local git stats (review.git.log)
 ---@field review { active: boolean, supported: boolean|nil, exists: boolean, count: integer, summary: string|nil }
+---@field ci table|nil  CI/CD pipeline cache (review.ci)
 
 ---@type table<integer, ReviewSession>
 M.sessions = {}
